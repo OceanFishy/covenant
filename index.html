@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Covenant — Leveragecoins</title>
+  <meta name="description" content="Covenant Finance splits yield-bearing assets into leveragecoins and yieldcoins. Multiply your exposure. Keep your yield." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230a0b0e'/><path d='M16 6 L25 11 L25 21 L16 26 L7 21 L7 11 Z' fill='none' stroke='%23c4a26a' stroke-width='2'/><circle cx='16' cy='16' r='3' fill='%23c4a26a'/></svg>" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="#">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M16 3 L28 10 L28 22 L16 29 L4 22 L4 10 Z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M16 9 L22.5 12.75 L22.5 20.25 L16 24 L9.5 20.25 L9.5 12.75 Z" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".55"/>
+          <circle cx="16" cy="16.5" r="2" fill="currentColor"/>
+        </svg>
+        <span class="brand-word">Covenant</span>
+      </a>
+      <nav class="nav">
+        <a href="#markets" class="active">Leverage</a>
+        <a href="#yield-bridge">Yield</a>
+        <a href="#how">Mechanism</a>
+        <a href="#stats">Stats</a>
+        <a href="#">Docs</a>
+      </nav>
+      <div class="actions">
+        <div class="chip chain" title="Monad">
+          <span class="chip-dot"></span>
+          Monad
+        </div>
+        <button class="btn btn-primary btn-sm" type="button">Connect wallet</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+
+    <!-- ──────────────── HERO ──────────────── -->
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow">
+          <span class="eyebrow-dot"></span>
+          Leveragecoins · live on Monad
+        </div>
+        <h1 class="display">
+          Multiply your exposure.<br/>
+          <span class="accent-text">Keep your yield.</span>
+        </h1>
+        <p class="lede">
+          Covenant splits any yield-bearing asset into two ERC-20s: a <em>leveragecoin</em>
+          that gives multiplied price and yield exposure, and a <em>yieldcoin</em> that
+          earns the carry. No perps. No funding auctions. No trusted operators.
+        </p>
+        <div class="hero-ctas">
+          <a class="btn btn-primary" href="#markets">Browse markets</a>
+          <a class="btn btn-ghost" href="#how">How it works <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="hero-meta">
+          <div class="hero-meta-item">
+            <span class="dot pos"></span> 6 markets live
+          </div>
+          <div class="hero-meta-item">
+            <span class="dot"></span> Backed by shMON
+          </div>
+          <div class="hero-meta-item">
+            <span class="dot"></span> Audited · Immutable
+          </div>
+        </div>
+      </div>
+
+      <aside class="hero-card" aria-label="Live stats">
+        <div class="hero-card-head">
+          <div class="hero-card-title">Live backing</div>
+          <div class="hero-card-tag" id="lastUpdated">updated just now</div>
+        </div>
+
+        <div class="hero-stats">
+          <div class="hero-stat">
+            <div class="hs-label">shMON APR</div>
+            <div class="hs-value pos mono" data-val="apr">12.78%</div>
+            <div class="hs-sub">DefiLlama · 30d base yield</div>
+          </div>
+          <div class="hero-stat">
+            <div class="hs-label">shMON → MON</div>
+            <div class="hs-value mono" data-val="rate">1.5444</div>
+            <div class="hs-sub">convertToAssets · on-chain</div>
+          </div>
+          <div class="hero-stat">
+            <div class="hs-label">Protocol TVL</div>
+            <div class="hs-value mono">$42.6M</div>
+            <div class="hs-sub"><span class="pos">▲ 5.2%</span> past 7d</div>
+          </div>
+          <div class="hero-stat">
+            <div class="hs-label">Markets</div>
+            <div class="hs-value mono">6</div>
+            <div class="hs-sub">3 USD-debt · 3 MON-debt</div>
+          </div>
+        </div>
+
+        <div class="hero-ticker" id="heroTicker">
+          <div class="tick">
+            <span class="tick-name">shMONx2.usd</span>
+            <span class="tick-sep">·</span>
+            <span class="mono pos">+17.36%</span>
+          </div>
+          <div class="tick">
+            <span class="tick-name">shMONx5.MON</span>
+            <span class="tick-sep">·</span>
+            <span class="mono pos">+49.90%</span>
+          </div>
+          <div class="tick">
+            <span class="tick-name">USD.b.shMON</span>
+            <span class="tick-sep">·</span>
+            <span class="mono pos">+8.20%</span>
+          </div>
+          <div class="tick">
+            <span class="tick-name">MON.b.shMON</span>
+            <span class="tick-sep">·</span>
+            <span class="mono pos">+3.50%</span>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ──────────────── MARKETS ──────────────── -->
+    <section class="section markets" id="markets">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">Markets</div>
+          <h2 class="section-title">Leveragecoins backed by shMON</h2>
+          <p class="section-sub">
+            USD-debt markets behave like a leveraged perpetual on MON/USD. MON-debt
+            markets behave like a looped shMON/MON position — no directional exposure,
+            amplified yield.
+          </p>
+        </div>
+        <div class="filters" role="tablist" aria-label="Market filter">
+          <button class="chip filter active" data-filter="all" type="button">All</button>
+          <button class="chip filter" data-filter="usd" type="button">USD debt</button>
+          <button class="chip filter" data-filter="mon" type="button">MON debt</button>
+        </div>
+      </div>
+
+      <div class="market-grid" id="marketGrid"></div>
+
+      <div class="section-foot">
+        <span class="mono mono-dim">6 / 6 shown</span>
+        <span class="section-foot-note">Each leveragecoin has a paired yieldcoin. <a href="#yield-bridge">See the yield side →</a></span>
+      </div>
+    </section>
+
+    <!-- ──────────────── DETAIL ──────────────── -->
+    <section class="section detail" id="detail" aria-live="polite">
+      <div class="detail-inner" id="detailInner"></div>
+    </section>
+
+    <!-- ──────────────── MECHANISM ──────────────── -->
+    <section class="section how" id="how">
+      <div class="section-head how-head">
+        <div>
+          <div class="section-eyebrow">Mechanism</div>
+          <h2 class="section-title">One asset. Two tokens. Zero operators.</h2>
+          <p class="section-sub">
+            Covenant's CDP deposits yield-bearing collateral and mints two ERC-20s
+            against it. The leveragecoin takes the multiplied exposure and pays the
+            carry. The yieldcoin takes the carry and the principal protection.
+          </p>
+        </div>
+      </div>
+
+      <div class="how-grid">
+        <div class="how-card">
+          <div class="how-num">01</div>
+          <div class="how-card-title">Deposit yield-bearing collateral</div>
+          <p>
+            Anyone deposits shMON — or MON that auto-wraps — into a Covenant vault.
+            The vault holds the shMON as productive collateral and continues to earn
+            the full <span class="mono">12.78%</span> base APR from Monad staking.
+          </p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">02</div>
+          <div class="how-card-title">Mint the split ERC-20s</div>
+          <p>
+            Against every unit of shMON, the vault mints a matched pair: one
+            <span class="mono">shMONxN.{usd,MON}</span> leveragecoin with <em>N×</em>
+            the price and yield exposure, and one <span class="mono">{USD,MON}.b.shMON</span>
+            yieldcoin that holds the <em>(N−1)×</em> debt claim.
+          </p>
+        </div>
+        <div class="how-card">
+          <div class="how-num">03</div>
+          <div class="how-card-title">Carry flows one direction</div>
+          <p>
+            Every block, the leveragecoin side accrues a borrow rate on the debt —
+            denominated in USD or MON depending on the market. That interest streams
+            straight to the yieldcoin, which earns it as passive APR.
+          </p>
+        </div>
+      </div>
+
+      <div class="how-math">
+        <div class="how-math-head">
+          <div class="section-eyebrow">Primer</div>
+          <h3 class="how-math-title">Sizing a <span class="mono">shMONx5.MON</span> position</h3>
+        </div>
+        <div class="how-math-body">
+          <div class="math-row">
+            <div class="math-label">Deposit</div>
+            <div class="math-expr mono">1.000 shMON</div>
+            <div class="math-note">≈ 1.5444 MON of collateral value</div>
+          </div>
+          <div class="math-row">
+            <div class="math-label">Debt minted</div>
+            <div class="math-expr mono">4 × 1.5444 = 6.1777 MON</div>
+            <div class="math-note">borrowed from MON.b.shMON yieldcoin holders</div>
+          </div>
+          <div class="math-row">
+            <div class="math-label">Gross yield</div>
+            <div class="math-expr mono">5 × 12.78% = 63.90%</div>
+            <div class="math-note">5× shMON staking yield on the total long leg</div>
+          </div>
+          <div class="math-row">
+            <div class="math-label">Borrow drag</div>
+            <div class="math-expr mono neg">− 4 × 3.50% = −14.00%</div>
+            <div class="math-note">MON-debt borrow rate, paid to yieldcoin</div>
+          </div>
+          <div class="math-row net">
+            <div class="math-label">Net APR</div>
+            <div class="math-expr mono pos">+ 49.90%</div>
+            <div class="math-note">assuming shMON peg holds, MON price cancels</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ──────────────── YIELD BRIDGE ──────────────── -->
+    <section class="section yield-bridge" id="yield-bridge">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">The other side</div>
+          <h2 class="section-title">Yieldcoins: earn the carry</h2>
+          <p class="section-sub">
+            Every leveragecoin has a matched yieldcoin. Hold it to receive the interest
+            leveragecoin users pay, denominated in the asset you already want to hold.
+          </p>
+        </div>
+      </div>
+      <div class="yield-grid">
+        <a class="yield-card" href="#">
+          <div class="yc-head">
+            <div class="yc-ticker mono">USD.b.shMON</div>
+            <div class="yc-chip">USD · backed by shMON</div>
+          </div>
+          <div class="yc-body">
+            <div class="yc-stat">
+              <div class="yc-stat-label">Variable APR</div>
+              <div class="yc-stat-value pos mono">8.20%</div>
+            </div>
+            <div class="yc-stat">
+              <div class="yc-stat-label">Redeems to</div>
+              <div class="yc-stat-value mono">1.00 USD</div>
+            </div>
+          </div>
+          <p class="yc-desc">Like USDC, but earns the carry paid by USD-debt leveragecoin holders. Principal protected by shMON collateral.</p>
+          <div class="yc-cta">Open market →</div>
+        </a>
+        <a class="yield-card" href="#">
+          <div class="yc-head">
+            <div class="yc-ticker mono">MON.b.shMON</div>
+            <div class="yc-chip">MON · backed by shMON</div>
+          </div>
+          <div class="yc-body">
+            <div class="yc-stat">
+              <div class="yc-stat-label">Variable APR</div>
+              <div class="yc-stat-value pos mono">3.50%</div>
+            </div>
+            <div class="yc-stat">
+              <div class="yc-stat-label">Redeems to</div>
+              <div class="yc-stat-value mono">1.00 MON</div>
+            </div>
+          </div>
+          <p class="yc-desc">Like wrapped MON, but earns the carry paid by MON-debt leveragecoin holders. Fully MON-denominated.</p>
+          <div class="yc-cta">Open market →</div>
+        </a>
+      </div>
+    </section>
+
+    <!-- ──────────────── STATS STRIP ──────────────── -->
+    <section class="section stats-strip" id="stats">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">Protocol stats</div>
+          <h2 class="section-title">Transparent by construction</h2>
+          <p class="section-sub">
+            Covenant is entirely on-chain. Every number on this page can be reproduced
+            from a single RPC call against the vault contracts on Monad.
+          </p>
+        </div>
+      </div>
+      <div class="strip">
+        <div class="strip-item">
+          <div class="strip-label">Total value locked</div>
+          <div class="strip-value mono">$42,604,318</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-label">shMON under management</div>
+          <div class="strip-value mono">17,923.41</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-label">Leveragecoins outstanding</div>
+          <div class="strip-value mono">14,207</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-label">Yieldcoins outstanding</div>
+          <div class="strip-value mono">38,914</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-label">Interest paid (30d)</div>
+          <div class="strip-value mono">$184,206</div>
+        </div>
+        <div class="strip-item">
+          <div class="strip-label">Contracts</div>
+          <div class="strip-value mono small"><a class="code-link" href="https://explorer.monad.xyz/" target="_blank" rel="noreferrer">0x…deadbeef</a></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div class="footer-brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M16 3 L28 10 L28 22 L16 29 L4 22 L4 10 Z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <circle cx="16" cy="16.5" r="2" fill="currentColor"/>
+        </svg>
+        <div>
+          <div class="brand-word">Covenant</div>
+          <div class="footer-tagline">A covenant between borrower and lender, written in solidity.</div>
+        </div>
+      </div>
+      <div class="footer-cols">
+        <div class="footer-col">
+          <div class="footer-col-title">Product</div>
+          <a href="#markets">Leveragecoins</a>
+          <a href="#yield-bridge">Yieldcoins</a>
+          <a href="#stats">Stats</a>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-title">Developers</div>
+          <a href="#">Docs</a>
+          <a href="#">Contracts</a>
+          <a href="#">GitHub</a>
+        </div>
+        <div class="footer-col">
+          <div class="footer-col-title">Community</div>
+          <a href="#">Discord</a>
+          <a href="#">Twitter</a>
+          <a href="#">Mirror</a>
+        </div>
+      </div>
+    </div>
+    <div class="wrap footer-sub">
+      <div>© Covenant Labs · Monad</div>
+      <div>Built for the covenant between yield and exposure.</div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
