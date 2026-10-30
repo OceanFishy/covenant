@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** Draft v0.4 · **Owner:** fish · **Date:** 2026-10-30
+**Status:** v0.5 (M0 done) · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -116,7 +116,7 @@ you exposed to price moves and liquidation risk.
 - **RPC:** a user-supplied RPC URL (stored locally) plus a fallback. Simulation
   uses `eth_simulateV1` where the RPC supports it, otherwise a Tenderly or
   Alchemy simulation API key the user supplies.
-- **Contracts:** Foundry. `CovenantExecutor` plus protocol adapters (§5).
+- **Contracts:** Solidity 0.8.28 (Cancun). It builds and tests with Hardhat 3 or Foundry from the same files. `CovenantExecutor` plus protocol adapters (§5).
 
 ---
 
@@ -156,26 +156,41 @@ you exposed to price moves and liquidation risk.
 
 ### 5.1 `CovenantExecutor`
 
-A personal, non-upgradeable contract with a single owner.
+A personal, non-upgradeable contract with a single owner. It's implemented in
+[`contracts/CovenantExecutor.sol`](../contracts/CovenantExecutor.sol), about 300
+lines.
 
 ```solidity
-struct Call {
-    address target;
-    uint256 value;
-    bytes   data;
-    Patch[] patches;   // runtime amount injection
-    bool    captureReturn;
-}
+enum Source { BALANCE, MORPHO_COLLATERAL, MORPHO_BORROW_SHARES, MORPHO_DEBT_ASSETS }
 
 struct Patch {
-    uint16  offset;    // byte offset in `data` to overwrite (a uint256 slot)
-    uint8   source;    // BALANCE_OF | RETURN_OF | DEBT_OF | COLLATERAL_OF | CONST
-    bytes   args;      // e.g. abi.encode(token) or abi.encode(callIndex, wordIndex)
-    uint16  bps;       // scale factor, 10_000 = 100%
+    uint32 offset;   // byte offset in `data` of the uint256 word to overwrite (>= 4)
+    Source source;   // value read on-chain at execution time
+    bytes  args;     // (token, account) or (marketId, user)
+    uint32 bps;      // scale, 10_000 = 100% (e.g. 10_001 = debt + 0.01% buffer)
 }
 
-function execute(Call[] calldata calls, bytes32 planHash) external payable onlyOwner;
+struct Call { address target; bytes data; Patch[] patches; }
+
+function execute(Call[] calldata calls, address[] calldata sweep, bytes32 planHash) external; // onlyOwner
+function onMorphoFlashLoan(uint256 assets, bytes calldata data) external; // data = abi.encode(token, Call[])
+
+// Guards, callable from plans, revert on failure
+function assertMinBalance(address token, address account, uint256 min) external view;
+function assertNoDebt(bytes32 id, address user) external view;
+function assertMinHealth(bytes32 id, address user, uint256 minHealthWad) external view;
 ```
+
+**Allowlist encoding:** one `uint256` rule per (target, selector).
+- Bit 0: the call is allowed.
+- Bit `i+1`: argument word `i` must be the owner or the Executor. This is how
+  receivers and `onBehalf` are pinned.
+- Bit 255: argument word 0 (the ERC-20 `transfer`/`approve` recipient) must be
+  on that token's recipient allowlist.
+
+The mainnet rules live in
+[`contracts/config/MainnetConfig.sol`](../contracts/config/MainnetConfig.sol) and
+are passed to the constructor, so deploying is a single transaction.
 
 **Rules:**
 - `onlyOwner` on `execute`. The owner is the Ledger EOA, fixed at deployment.
@@ -202,11 +217,12 @@ function execute(Call[] calldata calls, bytes32 planHash) external payable onlyO
   - **Aggregator swaps:** the compiler rejects any swap whose input or output is
     a Pendle asset. Because of the recipient check, the Executor can't hand a
     PT or YT to an aggregator anyway.
-- **Ends empty:** after `execute` the Executor must hold zero of every token it
-  touched. Leftovers are swept to the owner in the final step, and an invariant
-  check reverts otherwise.
-- **No persistent approvals:** approvals the Executor gives are exact-amount and
-  reset to 0 at the end of the call (or go through Permit2 with a short expiry).
+- **Ends empty:** `execute` sends the full balance of every `sweep` token to the
+  owner at the end. The compiler always lists every token the plan touches, and
+  the fork tests assert that the Executor ends with a zero balance.
+- **Approvals are consumed:** each approval the Executor gives is sized to what
+  the next call pulls, so templates end with zero allowances. The Executor
+  holds no funds between transactions anyway.
 - `planHash` is emitted in an event so on-chain history maps back to the plan
   JSON.
 - Holds no admin keys besides `owner`. `rescue(token)` is owner-only.
@@ -226,9 +242,9 @@ function execute(Call[] calldata calls, bytes32 planHash) external payable onlyO
   its owner (your Ledger) signs, so this is the same trust as the Executor
   owning the positions outright. It covers all your Morpho Blue markets, so the
   Executor's owner and callback gating (§5.1) are what protect them.
-- **Revoke any time:** Settings has a **Revoke** button
-  (`setAuthorization(executor, false)`). Deploying a new Executor version means
-  revoking the old one and authorizing the new one.
+- **Revoke any time:** a **Revoke** control is always visible in the app
+  (§9.3). Deploying a new Executor version means revoking the old one and
+  authorizing the new one.
 
 Alternatives rejected for being more complex:
 - Authorizing and revoking inside every transaction (`setAuthorizationWithSig`)
@@ -324,9 +340,19 @@ you don't sell the YT elsewhere.
 
 | Block | Does | Notes |
 |---|---|---|
-| `threejane.depositUSD3` | USDC → USD3 (senior tranche, ERC-4626) | |
+| `threejane.depositUSD3` | USDC → USD3 (senior tranche, ERC-4626) | **Capped and whitelisted.** On 2026-10-30 capacity went from 70.8k to 0.81 USDC within hours. Only whitelisted addresses (such as SY-USD3) can deposit. Preflight reads `maxDeposit(SY-USD3)` |
 | `threejane.redeemUSD3` | USD3 → USDC | No cooldown on USD3, **but redemptions depend on available liquidity**. Preflight reads `maxRedeem`/`maxWithdraw` and the UI warns if the plan exceeds it |
 | `threejane.stakeSUSD3` / `requestUnstake` | USD3 ↔ sUSD3 (junior) | sUSD3 has about a 1-month cooldown, so it can't be used inside an atomic exit. Shown as a two-transaction flow |
+
+**Measured (2026-10-30):** USD3 is a Yearn V3 tokenized strategy. You can
+redeem about **4.53M USDC** at once (`availableWithdrawLimit`). SY-USD3 redeems
+**straight to USDC** (`getTokensOut` = USDC, USD3), so an exit needs no separate
+3Jane step.
+
+**Entry is limited by 3Jane's deposit cap.** Entering with USDC via
+`SY.deposit(USDC)` only works while USD3 has deposit capacity. When it's full,
+the entry template (§7.4) is disabled and the reason is shown. Entering with
+USD3 you already hold (`SY.deposit(USD3)`) isn't capped.
 
 **Liquidity fallback:** if `maxRedeem(executor) < needed`, the template offers
 (a) a partial unwind sized to the available liquidity, or (b) swapping the
@@ -361,8 +387,7 @@ morpho.flashLoan(USDC, amount = debt(market) × 1.0005 buffer)
   ├─ morpho.repay(market, shares = all, onBehalf = EOA)
   ├─ morpho.withdrawCollateral(market, all, onBehalf = EOA, receiver = executor)
   ├─ pendle.redeemPY(PT, YT) → SY-USD3         [needs YT ≥ PT pre-maturity]
-  ├─ pendle.redeemSY(all SY) → USD3
-  ├─ threejane.redeemUSD3(all USD3) → USDC     [minOut = previewRedeem × 0.999]
+  ├─ pendle.redeemSY(all SY) → USDC            [SY-USD3 redeems via 3Jane; minOut = previewRedeem × 0.999]
   └─ (flash loan repaid automatically from executor USDC)
 guard.zeroDebt(market)
 guard.minBalance(USDC, userMinOut)
@@ -478,8 +503,48 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
    - **One-time setup wizard:** deploy the Executor, call
      `setAuthorization(executor, true)` on Morpho, and approve the loop tokens
      to the Executor. That's roughly 3–6 Ledger transactions, done once.
-   - **Revoke:** one-click buttons to remove the Morpho authorization and
-     the token approvals.
+   - **Revoke:** see §9.3. It's also on every screen, not just in Settings.
+
+### 9.3 Executor access and revoke (always visible)
+
+You can see at a glance whether the Executor can act for you, and turn that off
+in one click.
+
+- **Access badge on every screen,** in the header. It reads live on-chain state
+  every block:
+  - `Morpho.isAuthorized(you, executor)`.
+  - `allowance(you, executor)` for every loop token (USDC, USD3, reUSD, PT and YT
+    for each market).
+  - It shows **"Executor access: ON"** (amber) with a count, or **"OFF"** (grey).
+  - Clicking it opens the Access panel.
+- **Access panel:**
+  - A list of each permission with its current value (authorized yes/no, the
+    allowance amount or "unlimited") and its own **Revoke** button.
+  - **Revoke all:** a big red button. It queues
+    `Morpho.setAuthorization(executor, false)` plus `approve(executor, 0)` for
+    each non-zero allowance, then walks through the Ledger prompts one by one
+    with a checklist. Each row turns green once it's mined and the badge
+    re-reads the chain.
+- **Revoke goes directly from your wallet** to Morpho and the token contracts.
+  It never goes through the Executor, so it works even if the Executor is buggy
+  or paused. These are simple calls that Rabby and the Ledger display clearly,
+  with no blind signing.
+- **Revoke has no dependencies.** It doesn't need simulation, quotes or the
+  plan compiler, only Rabby and an RPC.
+  - It has its own route, `/#/revoke`.
+  - It also stays reachable from the app's error screen, so it works when the
+    rest of the app fails.
+- **Fallback without Covenant:** the Access panel shows the exact contract,
+  function and arguments, so you can revoke from Etherscan's "Write contract"
+  tab.
+  - Morpho authorization: `0xBBBB…FFCb` → `setAuthorization(<executor>, false)`.
+    Rabby's own Approvals page and revoke.cash list ERC-20 approvals, but **not**
+    the Morpho authorization.
+  - Token approvals: also listed in Rabby's Approvals page.
+- **After revoking,** templates show "Executor access is off" and offer
+  **Re-enable** (the setup wizard's authorize and approve steps).
+- **Optional "session" mode** (a setting): after each executed plan, the app
+  immediately offers to revoke.
 
 ### 9.2 Speed features (the "swiftly" requirement)
 - From the Positions page, **Unwind → Review → Sign** takes 3 clicks.
@@ -492,22 +557,20 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
 
 ## 10. Data and registry
 
-`registry/mainnet.json` (versioned in git, reviewed manually; **no addresses
-are trusted from APIs**):
-
-```jsonc
-{
-  "tokens":   { "USDC": { "address": "0x…", "decimals": 6 }, "USD3": {…}, "reUSD": {…} },
-  "pendle":   { "markets": { "PT-USD3-<MATURITY>": { "pt": "0x…", "yt": "0x…", "sy": "0x…", "maturity": 0 } } },
-  "morpho":   { "blue": "0x…", "markets": { "PT-USD3/USDC": { "id": "0x…", "lltv": "…" } } },
-  "threejane":{ "usd3": "0x…", "susd3": "0x…" },
-  "re":       { "reUSD": "0x…", "mintRedeem": "0x…" },
-  "aggregators": { "...": "0x…" }
-}
-```
-
-All addresses are **TBD and must be verified** against official docs or
-explorers before first use. The Executor allowlist is built from this file.
+[`registry/mainnet.json`](../registry/mainnet.json) is versioned in git and
+reviewed manually. **No address is trusted from an API.**
+- **Verified on-chain (2026-10-30):**
+  - For Pendle: `YT.PT()`, `YT.SY()`, `expiry()` and SY `getTokensIn`/`getTokensOut`.
+  - For Morpho: market parameters via `idToMarketParams`.
+- **Contents:** USDC, USD3, reUSD; Morpho Blue; PT-USD3-17DEC2026 and
+  PT-reUSD-10DEC2026 (PT, YT, SY); and the Morpho USDC markets for each.
+  - PT-USD3 has two markets: A and B, both 86% LLTV, with different oracles.
+  - PT-reUSD has one: 91.5% LLTV.
+- **Excluded on purpose:** the Pendle router and market addresses are listed
+  under `neverAllowlisted`.
+- **Sync:** `contracts/config/MainnetConfig.sol` holds the same addresses for
+  the contract allowlist. The two must be kept in sync; M1 adds a test that
+  checks this.
 
 Off-chain data sources: Morpho API / subgraph (positions), the Pendle API
 (quotes, market data), 3Jane vault `maxRedeem`/`previewRedeem` on-chain, and
@@ -531,7 +594,7 @@ truth during simulation.
 | Registry typo | Allowlist changes are separate owner transactions, shown in a diff |
 | Protocol risk (3Jane liquidity, reUSD underwriting losses, PT stranded by a YT shortfall) | Surfaced as preflight warnings with live numbers |
 
-**Audit plan:** Executor < ~300 SLOC. Foundry unit tests, fork tests for every
+**Audit plan:** Executor < ~300 SLOC. Unit tests, fork tests for every
 template against mainnet state, invariant fuzzing (ends empty, only owner, flash
 loan always repaid), then an external review before moving significant size.
 
@@ -539,10 +602,26 @@ loan always repaid), then an external review before moving significant size.
 
 ## 12. Testing
 
-- **Contracts:** Foundry fork tests that replay each template on a mainnet fork
-  with real positions (impersonate a whale, open a loop, unwind it).
-- **Compiler:** golden tests from Plan JSON to calldata, and property tests that
-  every compiled plan passes the static validator.
+- **Tooling:** the contracts and Solidity tests run under **Hardhat 3** (`pnpm
+  test`) and **Foundry** (`forge test`). Both use the same files and
+  `remappings.txt`. Fork tests need `MAINNET_RPC_URL`.
+- **Unit tests** (`test/CovenantExecutor.t.sol`, no fork): owner-only access,
+  flash-callback gating, Pendle router rejected, PT/YT recipients restricted,
+  `transferFrom` limited to the owner, Morpho receivers and `onBehalf` pinned,
+  `setAuthorization` blocked from plans, patch bounds checked.
+- **Fork tests** (`test/fork/PtUsd3Loop.t.sol`, latest mainnet block):
+  - `test_flashUnwind_realPosition`: impersonates a real market A borrower
+    (597k PT, 447k USDC debt, HF 1.10) and fully unwinds in one transaction.
+    Debt 0, collateral 0, about **149.8k USDC** returned, YT consumed exactly,
+    Executor empty.
+  - `test_enterThenFlashUnwind`: opens a 3x loop from 10k USDC, then unwinds a
+    day later. **9,982 USDC** came back (−0.18%, mostly a day of borrow interest).
+  - `test_matchedUnwind_ytShortfall`: with 40% of the YT moved away, it only
+    withdraws matched PT. Debt is reduced, HF goes up, and nothing is sold.
+  - The entry tests mock USD3's deposit limit when the live cap is full, and log
+    when they do.
+- **Compiler (M1):** golden tests from Plan JSON to calldata, checked against
+  the Solidity `test/utils/Plans.sol` prototype.
 - **E2E:** Playwright against an anvil fork, with Rabby replaced by a mock
   EIP-1193 provider backed by a `viem` local account.
 - **Real Ledger + Rabby dry run:** add the anvil fork to Rabby as a custom
@@ -556,8 +635,8 @@ loan always repaid), then an external review before moving significant size.
 
 | # | Scope | Exit criteria |
 |---|---|---|
-| M0 | Registry + verified addresses; Foundry Executor with patches, flash callback, guards | Fork test: flash-unwind of a PT-USD3 Morpho loop passes |
-| M1 | Compiler + Plan JSON + simulation; minimal UI (Positions + Review/Sign); Rabby + Ledger signing; local `pnpm start` | Real unwind of a small position on mainnet from a Ledger |
+| M0 ✅ | Registry + verified addresses; Executor with patches, flash callback, guards | Fork test: flash-unwind of a real PT-USD3 Morpho loop passes |
+| M1 | Compiler + Plan JSON + simulation; minimal UI (Positions + Review/Sign + **Access/Revoke**); Rabby + Ledger signing; deploy script; local `pnpm start` | Real unwind of a small position on mainnet from a Ledger |
 | M2 | Full Builder UI (palette, drag-drop, amount wiring), templates 7.1–7.4 | Build a new custom flow in < 60s |
 | M3 | Re Protocol blocks, PT-reUSD templates, aggregator swaps, roll/migrate | reUSD loop entry and exit on a fork, then mainnet |
 | M4 | ERC-7730 descriptor, EIP-7702 mode, private RPC | Optional: sign with no Executor deployment, via 7702 |
@@ -581,10 +660,15 @@ loan always repaid), then an external review before moving significant size.
 7. **Hosting:** local only, served on 127.0.0.1 from your own clone. No public
    or IPFS deploy (§3).
 
+### Answered during M0
+- **SY-USD3 → USDC directly:** yes. `redeemSY(tokenOut = USDC)` replaces the
+  separate USD3 redemption step.
+- **3Jane liquidity:** about 4.53M USDC redeemable at once (2026-10-30). Deposits
+  are capped and whitelisted, and capacity was ~0 at the time of writing, so
+  entering with USDC can be blocked (§6.4).
+
 ### Still open
-1. **Does Pendle's SY-USD3 support USDC as `tokenOut` directly?** If so,
-   `redeemSY` + `redeemUSD3` collapse into one call. Check on-chain during M0.
-2. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
-   partial unwind needed?
-3. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
-   decides whether exits use `re.redeem` or a swap.
+1. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
+   decides whether exits use `re.redeem` or a swap (M3).
+2. **Which PT-USD3 market are your loops in,** A (`0xf8c5…`) or B (`0xecab…`)?
+   Both are supported, and the Positions page will detect it.

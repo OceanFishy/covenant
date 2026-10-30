@@ -1,10 +1,40 @@
 # Covenant
 
-A block-based transaction composer for Ledger wallets. You chain DeFi steps
-(withdraw collateral → redeem PT+YT → redeem USD3 → repay ...) into **one
-atomic transaction** so you can enter and exit leveraged loops such as PT-USD3
-(3Jane) and PT-reUSD (Re Protocol) on Morpho with a single signature.
+A block-based transaction composer for Ledger wallets (connected through
+Rabby). You chain DeFi steps (withdraw collateral → redeem PT+YT → repay ...)
+into **one atomic transaction** to enter and exit leveraged loops such as
+PT-USD3 (3Jane) and PT-reUSD (Re Protocol) on Morpho Blue with a single
+signature.
 
 - Spec: [`docs/SPEC.md`](docs/SPEC.md)
+- Verified mainnet addresses: [`registry/mainnet.json`](registry/mainnet.json)
 
-Status: specification only. No code yet.
+## Status
+
+**M0 is done:** the `CovenantExecutor` contract, the mainnet allowlist and fork
+tests. One fork test fully unwinds a real PT-USD3/USDC Morpho loop in one
+transaction. The frontend (M1) isn't built yet.
+
+## Layout
+
+```
+contracts/CovenantExecutor.sol        personal executor: allowlisted calls, runtime amount patches, Morpho flash loans, guards
+contracts/config/MainnetConfig.sol    mainnet addresses + allowlist rules (no Pendle router/AMM)
+test/CovenantExecutor.t.sol           access-control / allowlist unit tests
+test/fork/PtUsd3Loop.t.sol            mainnet-fork: real-position unwind, enter→unwind, YT-shortfall unwind
+test/utils/Plans.sol                  Solidity prototype of the plan compiler (templates §7)
+registry/mainnet.json                 verified addresses
+```
+
+## Run the tests
+
+```sh
+pnpm install --frozen-lockfile
+cp .env.example .env    # set MAINNET_RPC_URL
+export MAINNET_RPC_URL=...   # Hardhat reads it from the environment
+pnpm test:unit          # no network needed
+pnpm test:fork          # mainnet fork
+```
+
+The same files also run under Foundry with `forge test`, after
+`pnpm install` so that `node_modules/forge-std` exists.

@@ -1,0 +1,15 @@
+{
+  "name": "covenant",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "hardhat build",
+    "test": "hardhat test solidity",
+    "test:unit": "hardhat test solidity test/CovenantExecutor.t.sol",
+    "test:fork": "hardhat test solidity test/fork/PtUsd3Loop.t.sol"
+  },
+  "devDependencies": {
+    "forge-std": "github:foundry-rs/forge-std#v1.9.7",
+    "hardhat": "3.21.2"
+  }
+}

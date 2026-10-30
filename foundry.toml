@@ -1,0 +1,12 @@
+# Same contracts and tests also run under Foundry: `forge test`
+[profile.default]
+src = "contracts"
+test = "test"
+libs = ["node_modules"]
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+[rpc_endpoints]
+mainnet = "${MAINNET_RPC_URL}"

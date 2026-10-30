@@ -1,0 +1,72 @@
+{
+  "chainId": 1,
+  "verified": "2026-10-30",
+  "verification": "Each Pendle entry checked on-chain: YT.PT() == pt, YT.SY() == sy, YT.expiry(), SY.getTokensIn()/getTokensOut(), SY.yieldToken(). Morpho markets checked with Morpho.idToMarketParams(id). Keep in sync with contracts/config/MainnetConfig.sol.",
+  "tokens": {
+    "USDC": { "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "decimals": 6 },
+    "USDT": { "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "decimals": 6 },
+    "USD3": {
+      "address": "0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc",
+      "decimals": 6,
+      "notes": "3Jane senior tranche. Yearn V3 tokenized strategy (apiVersion 3.0.4), ERC-4626 over USDC. Deposits are capped and whitelisted (SY-USD3 is whitelisted); withdrawals limited by availableWithdrawLimit (~4.53M USDC on 2026-10-30)."
+    },
+    "reUSD": {
+      "address": "0x5086bf358635B81D8C47C66d1C8b9E567Db70c72",
+      "decimals": 18,
+      "notes": "Re Protocol. Not ERC-4626. Mint/redeem path still to be verified (M3)."
+    }
+  },
+  "morpho": {
+    "blue": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+    "markets": {
+      "PT-USD3-17DEC2026/USDC (A)": {
+        "id": "0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89",
+        "loanToken": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "collateralToken": "0x7f47c3e6b2c00fC4eB4d5Ae50d0Ab0Ab6888Eb4D",
+        "oracle": "0xe5E6Ec063E63A9D0c6Ac041d0AD2bd03F7f08d72",
+        "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
+        "lltv": "860000000000000000"
+      },
+      "PT-USD3-17DEC2026/USDC (B)": {
+        "id": "0xecabc12c73a97c766d0c6aeb4c15c635630d78158b2ac8370455a09efcc50837",
+        "loanToken": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "collateralToken": "0x7f47c3e6b2c00fC4eB4d5Ae50d0Ab0Ab6888Eb4D",
+        "oracle": "0x716021a5d598C22851764923271C90a0aa704754",
+        "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
+        "lltv": "860000000000000000"
+      },
+      "PT-reUSD-10DEC2026/USDC": {
+        "id": "0x1e9d614631a7df0ec07fb05b2c8cb2491575fd1a63a33bf187a6afb295a4fc64",
+        "loanToken": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "collateralToken": "0xeCfaFdC7741323a945A163ed068B5a3C43483957",
+        "oracle": "0x217d6DdCDB95112C51657F6270e8C079CFDB51f0",
+        "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
+        "lltv": "915000000000000000"
+      }
+    }
+  },
+  "pendle": {
+    "PT-USD3-17DEC2026": {
+      "pt": "0x7f47c3e6b2c00fC4eB4d5Ae50d0Ab0Ab6888Eb4D",
+      "yt": "0x5cFfCc9DdEF0fDcf395e2eA24CA5ED5A12032706",
+      "sy": "0xeA3BC608F32847B97965C5e1648BDFCd4C2C40d0",
+      "expiry": "2026-12-17T00:00:00Z",
+      "syTokensIn": ["USDC", "USD3"],
+      "syTokensOut": ["USDC", "USD3"]
+    },
+    "PT-reUSD-10DEC2026": {
+      "pt": "0xeCfaFdC7741323a945A163ed068B5a3C43483957",
+      "yt": "0xA8bD3B21291AcE53927b35563fc80615919E63D7",
+      "sy": "0x9487Bd5A3b16Ecb5F3184453E3ee75B800141648",
+      "expiry": "2026-12-10T00:00:00Z",
+      "syTokensIn": ["reUSD"],
+      "syTokensOut": ["reUSD"]
+    }
+  },
+  "neverAllowlisted": {
+    "notes": "Pendle router and market (AMM) contracts are deliberately excluded from the Executor allowlist.",
+    "pendleRouterV4": "0x888888888889758F76e7103c6CbF23ABbF58F946",
+    "pendleMarketPtUsd3": "0x4a5067c3ff1abb7449244025b0e37feaf77d8e3e",
+    "pendleMarketPtReUsd": "0x13285bcbc27f92b47b4edb99d744c07b48c977c0"
+  }
+}
