@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** v0.6 (M0 done) · **Owner:** fish · **Date:** 2026-10-30
+**Status:** v0.7 (M0 done, M1 built; awaiting a real-Ledger mainnet run) · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -90,8 +90,13 @@ you exposed to price moves and liquidation risk.
                     Ethereum: CovenantExecutor ──► Morpho / Pendle / 3Jane / Re / DEX
 ```
 
-- **Frontend:** Vite + React + TypeScript, `viem` + `wagmi`, `dnd-kit` for drag
-  and drop, Zustand for state. There's no backend.
+- **Frontend:** Vite + React + TypeScript and `viem`, in `app/`. There's no backend,
+  no wagmi and no state library, which keeps the dependency list short (React,
+  viem). Drag and drop arrives with the builder (M2).
+  - Aggregator APIs and Flashbots' status API go through the local Vite proxy
+    (`/api/0x`, `/api/kyber`, `/api/flashbots`). The 0x key stays in the Node
+    process and never reaches the browser bundle, and the CSP stays at
+    `connect-src 'self' <RPC>`.
 - **Hosting: local only.**
   - **Running it:** clone the repo, then `pnpm install && pnpm start`. That
     builds the app and serves it with `vite preview`, bound to `127.0.0.1` only
@@ -471,19 +476,44 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
    resolved addresses (with labels from the registry), the min/max bounds, and
    the simulated balance diff for the EOA ("−0 PT-USD3, −0 YT-USD3, +412,331.22
    USDC, debt 389,004.10 → 0").
-2. **Hash match:** the UI shows the transaction hash it expects. The Ledger shows
-   the same hash on screen in blind-signing mode. You confirm they match.
+2. **What to check on the Ledger and in Rabby:** the transaction goes to *your*
+   Executor (the address is shown on the Review screen) and calls `execute`.
+   - Covenant can't predict the final transaction hash, because Rabby sets the
+     nonce and gas.
+   - Instead it shows the plan hash (emitted on-chain in `Executed`) and the
+     calldata hash, and asks you to compare Rabby's simulation with its own.
+   - The Executor address is verified against the compiled bytecode (immutables
+     masked) and must be owned by your account, so a look-alike contract is
+     rejected before any plan is built.
 3. **ERC-7730 clear-signing descriptor** for `CovenantExecutor` (v1.1): it can at
    least clearly display the function, the `planHash` and the value. The one-time
    setup transactions (`setAuthorization`, ERC-20 `approve`) are simple calls
    that the Ledger can show clearly.
 4. **Simulation is mandatory:** the Sign button is disabled until a simulation
-   passes against the latest block. Re-simulation runs automatically if more
-   than ~3 blocks pass or the inputs change.
+   passes against the latest block.
+   - **On mainnet** it uses `eth_simulateV1`; **on the local fork** it uses
+     snapshot, send and revert.
+   - **While Review is open,** it re-simulates every block, and Sign is disabled
+     when the last result is more than 3 blocks old.
+   - **Minimum received:** the final plan is rebuilt with the *same* aggregator
+     route plus a guard that you receive at least 99.5% of the simulated amount.
+   - **If the aggregator leg fails** (the route reverted or delivered too little),
+     the app re-quotes with more headroom (0.1% → 0.3% → 0.6%).
 5. **On-chain guards everywhere:** every value-moving block has a `minOut` or
    guard. Even a mis-simulated transaction can't settle at bad prices.
-6. **Private submission (optional):** send through Flashbots Protect / MEV Blocker
-   RPC so the unwind can't be sandwiched.
+6. **MEV protection is required for every transaction.** Rabby broadcasts, so
+   the protected RPC is set in Rabby (Settings → Custom RPC → Ethereum):
+   - **Flashbots Protect** (`https://rpc.flashbots.net`), recommended.
+   - **MEV Blocker** (`https://rpc.mevblocker.io/noreverts`).
+
+   Both drop failing transactions instead of charging gas for them. Setup asks
+   you to confirm this, and every Sign and Send button stays disabled until you
+   do. Revokes are the only exception: they always work.
+
+   After each transaction, the app asks Flashbots Protect's public status API
+   (`protect.flashbots.net/tx/<hash>`) how it was routed. It shows **"Sent
+   privately"**, or a red warning if the transaction was seen in the public
+   mempool. MEV Blocker has no such API, so it's shown as unchecked.
 
 ---
 
@@ -652,12 +682,30 @@ loan always repaid), then an external review before moving significant size.
     when they do.
 - **Compiler (M1):** golden tests from Plan JSON to calldata, checked against
   the Solidity `test/utils/Plans.sol` prototype.
-- **E2E:** Playwright against an anvil fork, with Rabby replaced by a mock
-  EIP-1193 provider backed by a `viem` local account.
-- **Real Ledger + Rabby dry run:** add the anvil fork to Rabby as a custom
-  network with a **different chain id** (for example 31337), never as
-  "Ethereum" on chain 1. A transaction signed for a chain-1 fork could be
-  replayed on mainnet. Then run each template end to end with the real device.
+- **App unit tests** (`app/test/unit`, 15 tests, no network): patch offsets
+  point at the right argument words, flash data round-trips, deleverage redeems
+  only matched PT, USDT plans carry the swap guard, unwind-mode selection,
+  nested revert decoding, and swap sizing against a mocked aggregator.
+- **App integration tests** (`app/test/integration`): the TypeScript-compiled
+  plans run on a Hardhat mainnet fork.
+  - **Covered:** deploy → bytecode verification → setup; full unwind of a real
+    market A position; deleverage (90% YT); USDT market with a live aggregator
+    route; partial unwind (40% YT); look-alike Executor rejection; Revoke all.
+  - **Production path:** an `eth_simulateV1` test runs against live mainnet,
+    read-only, with the Executor placed via state overrides.
+- **E2E** (`app/e2e`, Playwright): the built app against a local fork, with a
+  mock Rabby announced over EIP-6963. It connects, confirms the MEV RPC,
+  deploys and verifies the Executor, authorizes and approves, unwinds a real
+  597k-PT loop in one transaction, and revokes everything. Screenshots are in
+  `app/e2e/screenshots/`.
+- **Real Ledger + Rabby dry run** (recommended before the first mainnet run):
+  1. Run `pnpm fork` (a Hardhat mainnet fork on `127.0.0.1:8545`, chain id 31337).
+  2. Start the app with `VITE_DEV_FORK=1 VITE_RPC_URL=http://127.0.0.1:8545`.
+  3. In Rabby, add a custom network: chain id 31337, RPC `http://127.0.0.1:8545`.
+     Never add the fork as "Ethereum" on chain 1: a transaction signed for a
+     chain-1 fork could be replayed on mainnet.
+  4. Your real account and positions exist on the fork. Run setup, an unwind and
+     a revoke with the real Ledger.
 
 ---
 
@@ -666,10 +714,10 @@ loan always repaid), then an external review before moving significant size.
 | # | Scope | Exit criteria |
 |---|---|---|
 | M0 ✅ | Registry + verified addresses; Executor with patches, flash callback, guards | Fork test: flash-unwind of a real PT-USD3 Morpho loop passes |
-| M1 | Compiler + Plan JSON + simulation; minimal UI (Positions + Review/Sign + **Access/Revoke**); Rabby + Ledger signing; deploy script; local `pnpm start` | Real unwind of a small position on mainnet from a Ledger |
+| M1 (built) | Compiler + simulation; UI (Positions, Review/Sign, Setup with deploy + verify, **Access/Revoke**); Rabby + Ledger signing; MEV-protected RPC; local `pnpm start` | ⏳ Real unwind of a small position on mainnet from a Ledger (needs you) |
 | M2 | Full Builder UI (palette, drag-drop, amount wiring), templates 7.1–7.4 | Build a new custom flow in < 60s |
 | M3 | Re Protocol blocks, PT-reUSD templates, aggregator swaps, roll/migrate | reUSD loop entry and exit on a fork, then mainnet |
-| M4 | ERC-7730 descriptor, EIP-7702 mode, private RPC | Optional: sign with no Executor deployment, via 7702 |
+| M4 | ERC-7730 descriptor, EIP-7702 mode | Optional: sign with no Executor deployment, via 7702 |
 
 ---
 
@@ -695,6 +743,9 @@ loan always repaid), then an external review before moving significant size.
    keyless fallback) instead of a single DEX pool. Only USDC/USDT are swapped,
    never Pendle assets.
 10. **Unwinds use flash loans** (a single pass) in every template.
+11. **MEV protection:** every transaction goes through Flashbots Protect or MEV
+    Blocker, set as Rabby's Ethereum RPC. Signing is blocked until you confirm
+    it, and routing is checked through Flashbots' status API (§8).
 
 ### Answered during M0
 - **SY-USD3 → USDC directly:** yes. `redeemSY(tokenOut = USDC)` replaces the
@@ -704,8 +755,11 @@ loan always repaid), then an external review before moving significant size.
   entering with USDC can be blocked (§6.4).
 
 ### Still open
-1. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
+1. **First real run (M1 exit):** deploy your Executor from your Ledger and unwind
+   a small position on mainnet. Everything up to the real device has been
+   tested on forks and with a mock wallet.
+2. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
    decides whether exits use `re.redeem` or a swap (M3).
-2. **0x API key:** the fork tests used KyberSwap because there's no key in this
+3. **0x API key:** the fork tests used KyberSwap because there's no key in this
    environment. Set `ZEROX_API_KEY` to make 0x the default, and to run the USDT
    tests against 0x routes.

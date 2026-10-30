@@ -36,8 +36,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
 
+  // Find Rabby, and reconnect without a prompt if it already authorized this site.
   useEffect(() => {
-    void discoverRabby().then((r) => setRabby(r ?? null));
+    void discoverRabby().then(async (r) => {
+      setRabby(r ?? null);
+      if (r) setConn(await connect(r, true).catch(() => undefined));
+    });
   }, []);
 
   const connectWallet = useCallback(async () => {

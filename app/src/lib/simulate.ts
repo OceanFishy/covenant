@@ -95,7 +95,15 @@ function changes(tokens: Address[], before: Hex[], after: Hex[]): BalanceChange[
 
 type SimV1Call = { status: Hex; returnData: Hex; gasUsed: Hex; error?: { message: string; data?: Hex } };
 
-async function simulateV1(client: PublicClient, plan: Plan, tokens: Address[]): Promise<SimulationResult> {
+/** eth_simulateV1 state overrides, keyed by address (tests use them; the app passes none). */
+export type StateOverrides = Record<Address, { code?: Hex; stateDiff?: Record<Hex, Hex> }>;
+
+async function simulateV1(
+  client: PublicClient,
+  plan: Plan,
+  tokens: Address[],
+  stateOverrides?: StateOverrides,
+): Promise<SimulationResult> {
   const reads = readCalls(plan, tokens);
   const state = stateCalls(plan);
   const calls = [
@@ -107,7 +115,7 @@ async function simulateV1(client: PublicClient, plan: Plan, tokens: Address[]): 
   const block = await client.getBlockNumber();
   const res = (await client.request({
     method: "eth_simulateV1" as never,
-    params: [{ blockStateCalls: [{ calls }], validation: false }, "latest"] as never,
+    params: [{ blockStateCalls: [{ calls, ...(stateOverrides && { stateOverrides }) }], validation: false }, "latest"] as never,
   })) as { calls: SimV1Call[] }[];
   const out = res[0].calls;
   const tx = out[reads.length];
@@ -156,10 +164,10 @@ function findRevertData(e: unknown): Hex | undefined {
   return undefined;
 }
 
-export async function simulatePlan(client: PublicClient, plan: Plan): Promise<SimulationResult> {
+export async function simulatePlan(client: PublicClient, plan: Plan, stateOverrides?: StateOverrides): Promise<SimulationResult> {
   const tokens = tokensFor(plan);
   const chainId = await client.getChainId();
-  return chainId === 31337 ? simulateDevFork(client, plan, tokens) : simulateV1(client, plan, tokens);
+  return chainId === 31337 ? simulateDevFork(client, plan, tokens) : simulateV1(client, plan, tokens, stateOverrides);
 }
 
 /**

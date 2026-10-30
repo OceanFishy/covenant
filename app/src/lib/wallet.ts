@@ -26,9 +26,11 @@ export function discoverRabby(ms = 400): Promise<ProviderDetail | undefined> {
 
 export type Connection = { account: Address; chainId: number; wallet: WalletClient; provider: EIP1193Provider };
 
-export async function connect(detail: ProviderDetail): Promise<Connection> {
+/** `silent`: only reconnect if Rabby already authorized this site (eth_accounts, no prompt). */
+export async function connect(detail: ProviderDetail, silent = false): Promise<Connection | undefined> {
   const provider = detail.provider;
-  const accounts = (await provider.request({ method: "eth_requestAccounts" })) as string[];
+  const accounts = (await provider.request({ method: silent ? "eth_accounts" : "eth_requestAccounts" })) as string[];
+  if (silent && !accounts.length) return undefined;
   if (!accounts.length) throw new Error("Rabby returned no account");
   const account = getAddress(accounts[0]);
   const chainId = Number(await provider.request({ method: "eth_chainId" }));
