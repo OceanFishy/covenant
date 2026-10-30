@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** Draft v0.2 · **Owner:** fish · **Date:** 2026-10-30
+**Status:** Draft v0.3 · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -123,11 +123,12 @@ you exposed to price moves and liquidation risk.
   "chainId": 1,
   "blocks": [
     { "id": "fl",  "type": "morpho.flashLoan", "token": "USDC", "amount": { "debt": "mkt:PT-USD3/USDC" },
-      "inner": ["rp", "wc", "rpy", "r3"] },
+      "inner": ["rp", "wc", "rpy", "rsy", "r3"] },
     { "id": "rp",  "type": "morpho.repay",     "market": "mkt:PT-USD3/USDC", "amount": "all" },
     { "id": "wc",  "type": "morpho.withdrawCollateral", "market": "mkt:PT-USD3/USDC", "amount": "all" },
-    { "id": "rpy", "type": "pendle.redeemPY",  "yt": "YT-USD3", "amount": { "output": "wc" }, "tokenOut": "USD3" },
-    { "id": "r3",  "type": "threejane.redeemUSD3", "amount": { "output": "rpy" }, "minOut": { "pctOfPreview": 9990 } },
+    { "id": "rpy", "type": "pendle.redeemPY",  "yt": "YT-USD3", "amount": { "output": "wc" } },
+    { "id": "rsy", "type": "pendle.redeemSY",  "sy": "SY-USD3", "amount": { "output": "rpy" }, "tokenOut": "USD3" },
+    { "id": "r3",  "type": "threejane.redeemUSD3", "amount": { "output": "rsy" }, "minOut": { "pctOfPreview": 9990 } },
     { "id": "g1",  "type": "guard.minBalance", "token": "USDC", "min": "1000e6" },
     { "id": "sw",  "type": "wallet.sweep",     "tokens": ["USDC", "USD3", "PT-USD3", "YT-USD3"] }
   ]
@@ -169,8 +170,23 @@ function execute(Call[] calldata calls, bytes32 planHash) external payable onlyO
   callback are passed in the flash loan `data` and run through the same
   interpreter.
 - **Target allowlist:** each `Call.target` must be in an owner-managed allowlist
-  (Morpho, Pendle Router, the USD3 vault, Re contracts, Permit2, known tokens,
-  the aggregator router). Changing the allowlist is its own owner transaction.
+  (Morpho, Pendle YT/SY contracts, the USD3 vault, Re contracts, Permit2, known
+  tokens, the aggregator router). Changing the allowlist is its own owner
+  transaction.
+- **No Pendle trading, enforced on-chain.** The Executor never buys or sells
+  Pendle assets (PT, YT, SY, LP). It can only redeem them (and mint them; see
+  §6.3).
+  - **No Pendle router or market.** The Pendle Router and Pendle market (AMM)
+    contracts are **never** on the allowlist. Pendle calls go straight to the
+    core contracts: `YT.redeemPY` / `YT.mintPY` and `SY.redeem` / `SY.deposit`.
+  - **Selector allowlist** for every Pendle target: only those functions, plus
+    ERC-20 `transfer`/`approve`.
+  - **Recipient check:** a PT, YT or SY `transfer`/`approve` is only allowed to
+    the market's own YT/SY contract, Morpho Blue (collateral) or the owner
+    (sweep).
+  - **Aggregator swaps:** the compiler rejects any swap whose input or output is
+    a Pendle asset. Because of the recipient check, the Executor can't hand a
+    PT or YT to an aggregator anyway.
 - **Ends empty:** after `execute` the Executor must hold zero of every token it
   touched. Leftovers are swept to the owner in the final step, and an invariant
   check reverts otherwise.
@@ -227,11 +243,11 @@ simulation preview.
 | `wallet.sweep` | Send all balances of listed tokens back to the EOA | Always added automatically as the final block |
 | `erc20.approve` | Exact-amount approval from the Executor | Inserted automatically by the compiler before blocks that need it |
 | `erc4626.deposit` / `redeem` | Generic vault in/out | Covers many yield tokens. Uses `previewRedeem` for minOut |
-| `swap.aggregator` | Swap via 1inch / 0x / Odos / Pendle router | Quote fetched at build time. `minOut` enforced on-chain. Re-quoted if stale > N blocks |
+| `swap.aggregator` | Swap non-Pendle tokens via 1inch / 0x / Odos | Quote fetched at build time. `minOut` enforced on-chain. Re-quoted if stale > N blocks. **Pendle assets are never allowed as input or output** (§5.1) |
 | `guard.minBalance` | Revert if the Executor's balance of a token < min | |
 | `guard.healthFactor` | Revert if a Morpho position's HF < target after the step | Reads the oracle and LLTV on-chain |
 | `guard.maxDebt` / `guard.zeroDebt` | Assert debt bounds | Used by unwind templates |
-| `guard.maxPriceImpact` | Revert if an AMM or aggregator leg loses more than `bps` against its oracle or quoted price | Default 50 bps on the PT-shortfall swap |
+| `guard.maxPriceImpact` | Revert if an aggregator swap loses more than `bps` against its oracle or quoted price | Default 50 bps. Only applies to non-Pendle swaps |
 
 ### 6.2 Morpho Blue
 
@@ -251,32 +267,40 @@ IRM, LLTV), resolved from the market id in the registry.
 
 | Block | Does | Notes |
 |---|---|---|
-| `pendle.redeemPY` | PT + YT (equal amounts) → SY → `tokenOut` | Router `redeemPyToToken`. **Pre-maturity it needs matching YT.** Post-maturity it's PT-only |
-| `pendle.mintPY` | token → SY → PT + YT | For entering loops while keeping YT |
-| `pendle.swapPtToToken` / `swapTokenToPt` | Trade on the Pendle AMM | Has price impact. Quote via the Pendle API. Used when YT < PT, or to enter a PT-only loop |
-| `pendle.swapYt*` | Buy or sell YT | Optional, for fully exiting YT exposure |
+| `pendle.redeemPY` | PT + YT (equal amounts) → SY | Transfer PT and YT to the YT contract, then `YT.redeemPY(executor)`. **Pre-maturity it needs YT ≥ PT.** Post-maturity it's PT-only |
+| `pendle.redeemSY` | SY → underlying (USD3 / reUSD, or USDC if the SY supports it) | `SY.redeem(receiver, shares, tokenOut, minOut, false)` |
+| `pendle.mintPY` | underlying → SY → PT + YT | `SY.deposit` then `YT.mintPY(ptReceiver, ytReceiver)`. Entry only. Not buying: you get both PT and YT at par |
 
-**PT/YT shortfall handling (required, not an edge case).** Before maturity, your
-YT balance won't always cover the PT collateral, so every unwind template
-handles a shortfall by default:
+**Pendle rule: redeem only, never buy or sell.** There are no swap blocks for
+PT, YT, SY or LP, and the Pendle router and markets are excluded on-chain
+(§5.1). Interfaces are to be verified against Pendle's core contracts during M0.
 
-1. `redeemPY(YT held)`: redeem as much as the YT covers. The amount is known at
-   signing time, because the YT is pulled from the EOA with an exact Permit2
-   amount.
-2. Then, for the PT that's left (`balance(PT)` at runtime), the compiler quotes
-   two routes and picks the cheaper one:
-   - (a) `swapPtToToken`: sell the leftover PT on the Pendle AMM.
-   - (b) `swapTokenToYt` with part of the proceeds, then `redeemPY` on the rest.
-3. Guard `guard.maxPriceImpact(bps)` reverts the whole transaction if the AMM
-   leg costs more than the limit. The default is 50 bps, editable per plan.
-4. **Shown before signing:** the shortfall in PT, the chosen route, and its cost
-   in USDC.
-5. **Thin AMM liquidity:** if the leftover can't be sold within the limit, the
-   template offers a **partial unwind**. It sizes the flash loan and collateral
-   withdrawal to the most PT that can be exited within the limit, keeps the
-   health factor at or above target, and leaves the rest of the position open.
+**PT/YT shortfall handling.** Before maturity, PT can only be redeemed with an
+equal amount of YT. When your YT doesn't cover all the PT collateral, the
+template does a **matched unwind** and never sells the extra PT:
 
-After maturity, the shortfall goes away: PT redeems on its own.
+1. **Withdraw only matched PT:** `W = min(collateral, YT held)`. Redeem it, then
+   repay as much debt as the proceeds cover.
+2. **Choose a variant:**
+   - **Full deleverage:** if the proceeds from `W` cover the whole debt, the
+     template repays it all and then withdraws the rest of the PT, **unlevered**,
+     to your wallet. You hold it to maturity, or until you add YT outside
+     Covenant, and then redeem it.
+   - **Partial unwind:** otherwise, the template repays what it can and leaves a
+     smaller loop open.
+3. **The remaining position gets safer.** Equal value comes out of collateral
+   and debt, so the loan-to-value of what's left goes **down** (for example 100
+   collateral / 80 debt → 50 / 30, LTV 80% → 60%). A `guard.healthFactor` still
+   checks it.
+4. **Shown before signing:** the matched amount, the stranded PT and the
+   resulting position.
+5. **Acting on stranded PT later:** the Positions page shows how much YT you'd
+   need to exit fully. It also shows the date after which the remaining PT
+   redeems on its own.
+
+**Tip:** loops entered through Covenant use `mintPY`, which sends the YT to your
+wallet, so you always hold enough YT to fully exit later. That holds as long as
+you don't sell the YT elsewhere.
 
 **Maturity awareness:** the registry stores maturity. After maturity,
 `redeemPY` becomes PT-only redemption automatically.
@@ -290,15 +314,15 @@ After maturity, the shortfall goes away: PT redeems on its own.
 | `threejane.stakeSUSD3` / `requestUnstake` | USD3 ↔ sUSD3 (junior) | sUSD3 has about a 1-month cooldown, so it can't be used inside an atomic exit. Shown as a two-transaction flow |
 
 **Liquidity fallback:** if `maxRedeem(executor) < needed`, the template offers
-(a) a partial unwind sized to the available liquidity, or (b) selling USD3/PT on
-the Pendle AMM or an aggregator for the rest.
+(a) a partial unwind sized to the available liquidity, or (b) swapping the
+remaining **USD3** (not PT) to USDC via an aggregator, with `minOut`.
 
 ### 6.5 Re Protocol (reUSD / reUSDe)
 
 | Block | Does | Notes |
 |---|---|---|
 | `re.mint` | Approved stablecoin → reUSD | Through Re's Insurance Capital Layer contracts. **Verify whether minting is permissioned or KYC-gated for your address** |
-| `re.redeem` | reUSD → stablecoin | **Verify whether redemption is instant or queued.** If queued, it can't be used atomically. Use `swap.aggregator` / a Curve pool or the Pendle AMM instead |
+| `re.redeem` | reUSD → stablecoin | **Verify whether redemption is instant or queued.** If queued, it can't be used atomically. Use `swap.aggregator` / a Curve pool for **reUSD** (never PT-reUSD) instead |
 | `re.junior*` | reUSDe in/out | Junior tranche with underwriting (insurance-loss) risk. Not used in v1 templates |
 
 PT-reUSD loops on Morpho use the same templates as PT-USD3, with the conversion
@@ -321,9 +345,8 @@ Parameters: `market`, `pt`, `yt`, `underlying` (USD3 | reUSD), `redeemRoute`.
 morpho.flashLoan(USDC, amount = debt(market) × 1.0005 buffer)
   ├─ morpho.repay(market, shares = all, onBehalf = EOA)
   ├─ morpho.withdrawCollateral(market, all, onBehalf = EOA, receiver = executor)
-  ├─ pendle.redeemPY(YT held) → USD3           [skipped if no YT]
-  ├─ pendle.swapPtToToken(balance(PT)) → USD3  [only if YT short; see §6.3]
-  ├─ guard.maxPriceImpact(50 bps)
+  ├─ pendle.redeemPY(PT, YT) → SY-USD3         [needs YT ≥ PT pre-maturity]
+  ├─ pendle.redeemSY(all SY) → USD3
   ├─ threejane.redeemUSD3(all USD3) → USDC     [minOut = previewRedeem × 0.999]
   └─ (flash loan repaid automatically from executor USDC)
 guard.zeroDebt(market)
@@ -338,6 +361,10 @@ extra signature.
 **Result:** one transaction leaves you with pure USDC (equity = collateral value
 − debt − slippage) and zero debt, with the YT burned.
 
+**If YT is short:** the template switches to the matched unwind in §6.3. The
+flash loan and withdrawal are sized to the YT held, and the result is either
+USDC plus unlevered PT in your wallet, or a smaller, safer loop.
+
 ### 7.2 Iterative unwind (no flash loan)
 
 This mirrors your manual process inside one transaction:
@@ -345,7 +372,7 @@ This mirrors your manual process inside one transaction:
 ```
 repeat k times:
   morpho.withdrawCollateral(amount = maxWithdrawable(market, targetHF))
-  pendle.redeemPY → threejane.redeemUSD3
+  pendle.redeemPY → pendle.redeemSY → threejane.redeemUSD3   [withdrawal capped at YT held]
   morpho.repay(all USDC held)
 final: withdraw remaining collateral, convert, sweep
 ```
@@ -366,8 +393,7 @@ sized to a target leverage or HF.
 wallet.pull(USDC equity)
 morpho.flashLoan(USDC, amount = equity × (L − 1))
   ├─ threejane.depositUSD3(all USDC) → USD3       (or re.mint / swap for reUSD)
-  ├─ pendle.swapTokenToPt(all USD3) → PT          (PT-only loop)
-  │     or pendle.mintPY → PT + YT (YT swept to EOA)
+  ├─ pendle.mintPY(all USD3) → PT + YT            (YT swept to EOA; no AMM buy)
   ├─ morpho.supplyCollateral(all PT, onBehalf)
   └─ morpho.borrow(flashAmount, onBehalf, receiver = executor)
 guard.healthFactor(market, ≥ targetHF)
@@ -377,7 +403,9 @@ wallet.sweep
 ### 7.5 Roll PT maturity / Migrate market
 
 A flash loan closes market A and opens market B (for example PT-USD3-DEC →
-PT-USD3-MAR, or PT-USD3 → PT-reUSD) in one transaction.
+PT-USD3-MAR, or PT-USD3 → PT-reUSD) in one transaction. The old PT+YT are
+**redeemed** and the new PT+YT are **minted**. Nothing is traded on Pendle, so a
+roll also needs YT ≥ PT for the old maturity.
 
 ---
 
@@ -452,7 +480,7 @@ are trusted from APIs**):
 ```jsonc
 {
   "tokens":   { "USDC": { "address": "0x…", "decimals": 6 }, "USD3": {…}, "reUSD": {…} },
-  "pendle":   { "router": "0x…", "markets": { "PT-USD3-<MATURITY>": { "pt": "0x…", "yt": "0x…", "sy": "0x…", "market": "0x…", "maturity": 0 } } },
+  "pendle":   { "markets": { "PT-USD3-<MATURITY>": { "pt": "0x…", "yt": "0x…", "sy": "0x…", "maturity": 0 } } },
   "morpho":   { "blue": "0x…", "markets": { "PT-USD3/USDC": { "id": "0x…", "lltv": "…" } } },
   "threejane":{ "usd3": "0x…", "susd3": "0x…" },
   "re":       { "reUSD": "0x…", "mintRedeem": "0x…" },
@@ -480,9 +508,10 @@ truth during simulation.
 | Funds left in the Executor | Final sweep plus an "ends empty" invariant |
 | Leftover approvals | Exact amounts, reset at the end. Permit2 with short expiry |
 | Bad quote or sandwich | On-chain `minOut` per swap or redeem. Private RPC. Simulation at the latest block |
+| Pendle assets get traded by mistake | No Pendle router or market on the allowlist. Selector and recipient checks on PT/YT/SY (§5.1) |
 | A compromised frontend builds a malicious plan | Static, self-hosted or IPFS build with pinned dependencies; target allowlist on-chain; decoded review + hash match; `rescue` is owner-only |
 | Registry typo | Allowlist changes are separate owner transactions, shown in a diff |
-| Protocol risk (3Jane liquidity, reUSD underwriting losses, Pendle AMM depth) | Surfaced as preflight warnings with live numbers |
+| Protocol risk (3Jane liquidity, reUSD underwriting losses, PT stranded by a YT shortfall) | Surfaced as preflight warnings with live numbers |
 
 **Audit plan:** Executor < ~300 SLOC. Foundry unit tests, fork tests for every
 template against mainnet state, invariant fuzzing (ends empty, only owner, flash
@@ -523,13 +552,19 @@ loan always repaid), then an external review before moving significant size.
 3. **YT coverage:** YT may not always cover the PT, so shortfall handling is a
    default part of every unwind (§6.3).
 4. **Chain:** Ethereum mainnet only, including for the reUSD loops.
+5. **Pendle:** redeem only. The contract never buys or sells PT, YT, SY or LP,
+   and this is enforced on-chain (§5.1). A YT shortfall means a matched or
+   partial unwind, never a PT sale (§6.3).
 
 ### Still open
 1. **Does Pendle's SY-USD3 support USDC as `tokenOut` directly?** If so,
-   `redeemPY` + `redeemUSD3` collapse into one router call. Check on-chain during M0.
-2. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
+   `redeemSY` + `redeemUSD3` collapse into one call. Check on-chain during M0.
+2. **Is `mintPY` OK for entering loops?** It isn't a trade (you receive PT and
+   YT at par), but if you want Covenant to be exit-only, entry templates
+   (§7.4) get dropped.
+3. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
    partial unwind needed?
-3. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
+4. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
    decides whether exits use `re.redeem` or a swap.
-4. **Wallet path:** WebHID direct, Rabby + Ledger, or Ledger Live?
-5. **Hosting:** localhost only, or an IPFS deploy?
+5. **Wallet path:** WebHID direct, Rabby + Ledger, or Ledger Live?
+6. **Hosting:** localhost only, or an IPFS deploy?
