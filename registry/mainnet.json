@@ -3,8 +3,14 @@
   "verified": "2026-10-30",
   "verification": "Each Pendle entry checked on-chain: YT.PT() == pt, YT.SY() == sy, YT.expiry(), SY.getTokensIn()/getTokensOut(), SY.yieldToken(). Morpho markets checked with Morpho.idToMarketParams(id). Keep in sync with contracts/config/MainnetConfig.sol.",
   "tokens": {
-    "USDC": { "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "decimals": 6 },
-    "USDT": { "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "decimals": 6 },
+    "USDC": {
+      "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "decimals": 6
+    },
+    "USDT": {
+      "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "decimals": 6
+    },
     "USD3": {
       "address": "0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc",
       "decimals": 6,
@@ -42,6 +48,15 @@
         "oracle": "0x217d6DdCDB95112C51657F6270e8C079CFDB51f0",
         "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
         "lltv": "915000000000000000"
+      },
+      "PT-USD3-17DEC2026/USDT": {
+        "id": "0x37a584c981f6f59f7532ae5565732ee54647773d425978eb94d4cd29c21ff53b",
+        "loanToken": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+        "collateralToken": "0x7f47c3e6b2c00fC4eB4d5Ae50d0Ab0Ab6888Eb4D",
+        "oracle": "0xcb21E8fA3Eac83De7f7ACC194705E746f189c180",
+        "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
+        "lltv": "915000000000000000",
+        "notes": "USDT debt: exits swap USDC->USDT via an aggregator inside the flash loan (SY-USD3 only redeems to USDC/USD3)."
       }
     }
   },
@@ -51,16 +66,26 @@
       "yt": "0x5cFfCc9DdEF0fDcf395e2eA24CA5ED5A12032706",
       "sy": "0xeA3BC608F32847B97965C5e1648BDFCd4C2C40d0",
       "expiry": "2026-12-17T00:00:00Z",
-      "syTokensIn": ["USDC", "USD3"],
-      "syTokensOut": ["USDC", "USD3"]
+      "syTokensIn": [
+        "USDC",
+        "USD3"
+      ],
+      "syTokensOut": [
+        "USDC",
+        "USD3"
+      ]
     },
     "PT-reUSD-10DEC2026": {
       "pt": "0xeCfaFdC7741323a945A163ed068B5a3C43483957",
       "yt": "0xA8bD3B21291AcE53927b35563fc80615919E63D7",
       "sy": "0x9487Bd5A3b16Ecb5F3184453E3ee75B800141648",
       "expiry": "2026-12-10T00:00:00Z",
-      "syTokensIn": ["reUSD"],
-      "syTokensOut": ["reUSD"]
+      "syTokensIn": [
+        "reUSD"
+      ],
+      "syTokensOut": [
+        "reUSD"
+      ]
     }
   },
   "neverAllowlisted": {
@@ -68,5 +93,19 @@
     "pendleRouterV4": "0x888888888889758F76e7103c6CbF23ABbF58F946",
     "pendleMarketPtUsd3": "0x4a5067c3ff1abb7449244025b0e37feaf77d8e3e",
     "pendleMarketPtReUsd": "0x13285bcbc27f92b47b4edb99d744c07b48c977c0"
+  },
+  "aggregators": {
+    "notes": "Used only for USDC<->USDT. Only USDC/USDT may be approved to them (Executor recipient allowlist). Output enforced by assertMinBalance.",
+    "0x": {
+      "allowanceHolder": "0x0000000000001fF3684f28c67538d4D072C22734",
+      "selector": "exec(address,address,uint256,address,bytes) 0x2213bc0b",
+      "api": "https://api.0x.org/swap/allowance-holder/quote (needs ZEROX_API_KEY)",
+      "default": true
+    },
+    "kyberswap": {
+      "router": "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5",
+      "selector": "swap(SwapExecutionParams) 0xe21fd0e9",
+      "api": "https://aggregator-api.kyberswap.com/ethereum/api/v1 (no key)"
+    }
   }
 }

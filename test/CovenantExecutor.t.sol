@@ -79,6 +79,22 @@ contract CovenantExecutorTest is Test {
         _run(Plans.call(M.YT_USD3, abi.encodeCall(IERC20.approve, (attacker, 1))));
     }
 
+    /// Aggregators only ever receive USDC/USDT approvals, so Pendle assets can't be routed through them.
+    function test_pendleAssetsCannotBeApprovedToAggregators() public {
+        address[2] memory aggs = [M.ZEROX_ALLOWANCE_HOLDER, M.KYBER_ROUTER];
+        address[3] memory pendle = [M.PT_USD3, M.YT_USD3, M.SY_USD3];
+        for (uint256 i; i < aggs.length; ++i) {
+            for (uint256 j; j < pendle.length; ++j) {
+                vm.expectRevert(
+                    abi.encodeWithSelector(CovenantExecutor.RecipientNotAllowed.selector, pendle[j], aggs[i])
+                );
+                _run(Plans.call(pendle[j], abi.encodeCall(IERC20.approve, (aggs[i], 1))));
+            }
+            assertTrue(exec.allowedRecipient(M.USDC, aggs[i]));
+            assertTrue(exec.allowedRecipient(M.USDT, aggs[i]));
+        }
+    }
+
     function test_cannotPullFromOthers() public {
         vm.expectRevert(
             abi.encodeWithSelector(CovenantExecutor.ArgNotSelfOrOwner.selector, M.USDC, IERC20.transferFrom.selector, 0)

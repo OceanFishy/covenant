@@ -12,11 +12,18 @@ import {IPYieldToken, IStandardizedYield} from "../interfaces/IPendle.sol";
 library MainnetConfig {
     // Tokens
     address internal constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address internal constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address internal constant USD3 = 0x056B269Eb1f75477a8666ae8C7fE01b64dD55eCc; // 3Jane senior tranche (Yearn V3 strategy)
     address internal constant REUSD = 0x5086bf358635B81D8C47C66d1C8b9E567Db70c72;
 
     // Morpho Blue
     address internal constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+
+    // DEX aggregators, used only for USDC <-> USDT (USDT-debt loops). Only USDC and USDT may be
+    // approved to them, so Pendle assets can never be routed through an aggregator. The swap's
+    // output is checked by an Executor guard (assertMinBalance), independent of the route data.
+    address internal constant ZEROX_ALLOWANCE_HOLDER = 0x0000000000001fF3684f28c67538d4D072C22734; // 0x Swap API v2
+    address internal constant KYBER_ROUTER = 0x6131B5fae19EA4f9D964eAc0408E4408b66337b5; // MetaAggregationRouterV2
 
     // Pendle PT-USD3-17DEC2026
     address internal constant PT_USD3 = 0x7f47c3e6b2c00fC4eB4d5Ae50d0Ab0Ab6888Eb4D;
@@ -28,10 +35,11 @@ library MainnetConfig {
     address internal constant YT_REUSD = 0xA8bD3B21291AcE53927b35563fc80615919E63D7;
     address internal constant SY_REUSD = 0x9487Bd5A3b16Ecb5F3184453E3ee75B800141648;
 
-    // Morpho markets (USDC loans)
-    bytes32 internal constant MKT_PT_USD3_USDC_A = 0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89;
-    bytes32 internal constant MKT_PT_USD3_USDC_B = 0xecabc12c73a97c766d0c6aeb4c15c635630d78158b2ac8370455a09efcc50837;
-    bytes32 internal constant MKT_PT_REUSD_USDC = 0x1e9d614631a7df0ec07fb05b2c8cb2491575fd1a63a33bf187a6afb295a4fc64;
+    // Morpho markets
+    bytes32 internal constant MKT_PT_USD3_USDC_A = 0xf8c5aa31ea6b2a068a9eddb46dd110cae57bf0f12be9583a3f9a818effecba89; // LLTV 86%
+    bytes32 internal constant MKT_PT_USD3_USDC_B = 0xecabc12c73a97c766d0c6aeb4c15c635630d78158b2ac8370455a09efcc50837; // LLTV 86%
+    bytes32 internal constant MKT_PT_USD3_USDT = 0x37a584c981f6f59f7532ae5565732ee54647773d425978eb94d4cd29c21ff53b; // LLTV 91.5%
+    bytes32 internal constant MKT_PT_REUSD_USDC = 0x1e9d614631a7df0ec07fb05b2c8cb2491575fd1a63a33bf187a6afb295a4fc64; // LLTV 91.5%
 
     /// Rule bit requiring argument word `i` to be the owner or the Executor.
     function w(uint256 i) internal pure returns (uint256) {
@@ -41,9 +49,9 @@ library MainnetConfig {
     function rules() internal pure returns (CovenantExecutor.RuleInit[] memory r) {
         uint256 ALLOWED = 1;
         uint256 RECIPIENT = 1 << 255;
-        address[9] memory tokens = [USDC, USD3, REUSD, PT_USD3, YT_USD3, SY_USD3, PT_REUSD, YT_REUSD, SY_REUSD];
+        address[10] memory tokens = [USDC, USDT, USD3, REUSD, PT_USD3, YT_USD3, SY_USD3, PT_REUSD, YT_REUSD, SY_REUSD];
 
-        r = new CovenantExecutor.RuleInit[](6 + tokens.length * 3 + 4 * 2 + 3);
+        r = new CovenantExecutor.RuleInit[](6 + tokens.length * 3 + 4 * 2 + 3 + 2);
         uint256 n;
 
         // Morpho Blue. MarketParams is 5 static words (0..4), so arguments start at word 5.
@@ -80,13 +88,23 @@ library MainnetConfig {
         r[n++] = _r(USD3, bytes4(keccak256("redeem(uint256,address,address)")), ALLOWED | w(1) | w(2));
         r[n++] = _r(USD3, bytes4(keccak256("withdraw(uint256,address,address)")), ALLOWED | w(1) | w(2));
 
+        // Aggregators. AllowanceHolder.exec(operator, token, amount, target, data) forwards to the
+        // current 0x Settler; Kyber swap(SwapExecutionParams).
+        r[n++] = _r(ZEROX_ALLOWANCE_HOLDER, bytes4(keccak256("exec(address,address,uint256,address,bytes)")), ALLOWED);
+        r[n++] = _r(KYBER_ROUTER, bytes4(0xe21fd0e9), ALLOWED);
+
         assert(n == r.length);
     }
 
     function recipients() internal pure returns (CovenantExecutor.RecipientInit[] memory r) {
-        r = new CovenantExecutor.RecipientInit[](13);
+        r = new CovenantExecutor.RecipientInit[](18);
         uint256 n;
         r[n++] = CovenantExecutor.RecipientInit(USDC, MORPHO); // repay / flash repayment
+        r[n++] = CovenantExecutor.RecipientInit(USDT, MORPHO); // repay / flash repayment (USDT market)
+        r[n++] = CovenantExecutor.RecipientInit(USDC, ZEROX_ALLOWANCE_HOLDER); // USDC -> USDT
+        r[n++] = CovenantExecutor.RecipientInit(USDT, ZEROX_ALLOWANCE_HOLDER); // USDT -> USDC
+        r[n++] = CovenantExecutor.RecipientInit(USDC, KYBER_ROUTER);
+        r[n++] = CovenantExecutor.RecipientInit(USDT, KYBER_ROUTER);
         r[n++] = CovenantExecutor.RecipientInit(USDC, SY_USD3); // SY.deposit(USDC)
         r[n++] = CovenantExecutor.RecipientInit(USDC, USD3); // USD3.deposit
         r[n++] = CovenantExecutor.RecipientInit(USD3, SY_USD3); // SY.deposit(USD3)

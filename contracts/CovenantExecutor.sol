@@ -247,6 +247,11 @@ contract CovenantExecutor {
         return maxBorrow * WAD / debt;
     }
 
+    /// @notice Debt in loan-token units (rounded up) from the market's last-accrued totals.
+    function debtOf(bytes32 id, address user) external view returns (uint256) {
+        return _debtAssets(id, morpho.position(id, user).borrowShares);
+    }
+
     function _debtAssets(bytes32 id, uint256 shares) internal view returns (uint256) {
         if (shares == 0) return 0;
         Market memory m = morpho.market(id);
@@ -287,7 +292,11 @@ contract CovenantExecutor {
         _callToken(token, abi.encodeCall(IERC20.transfer, (to, amount)));
     }
 
+    /// Resets a non-zero allowance first: USDT reverts on approving non-zero to non-zero.
     function _approve(address token, address spender, uint256 amount) internal {
+        if (IERC20(token).allowance(address(this), spender) != 0) {
+            _callToken(token, abi.encodeCall(IERC20.approve, (spender, 0)));
+        }
         _callToken(token, abi.encodeCall(IERC20.approve, (spender, amount)));
     }
 

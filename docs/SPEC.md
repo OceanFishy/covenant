@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** v0.5 (M0 done) · **Owner:** fish · **Date:** 2026-10-30
+**Status:** v0.6 (M0 done) · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -274,7 +274,7 @@ simulation preview.
 | `wallet.sweep` | Send all balances of listed tokens back to the EOA | Always added automatically as the final block |
 | `erc20.approve` | Exact-amount approval from the Executor | Inserted automatically by the compiler before blocks that need it |
 | `erc4626.deposit` / `redeem` | Generic vault in/out | Covers many yield tokens. Uses `previewRedeem` for minOut |
-| `swap.aggregator` | Swap non-Pendle tokens via 1inch / 0x / Odos | Quote fetched at build time. `minOut` enforced on-chain. Re-quoted if stale > N blocks. **Pendle assets are never allowed as input or output** (§5.1) |
+| `swap.aggregator` | Swap stablecoins (USDC ↔ USDT) via **0x** (default; Swap API v2, AllowanceHolder) or **KyberSwap** (keyless fallback) | Route quoted at build time for a **fixed sell amount**, with the Executor as taker and recipient, and re-quoted if stale. The Executor checks the output with `assertMinBalance` whatever the route data says. Only USDC/USDT can be approved to an aggregator, so **Pendle assets can never be routed** (§5.1) |
 | `guard.minBalance` | Revert if the Executor's balance of a token < min | |
 | `guard.healthFactor` | Revert if a Morpho position's HF < target after the step | Reads the oracle and LLTV on-chain |
 | `guard.maxDebt` / `guard.zeroDebt` | Assert debt bounds | Used by unwind templates |
@@ -380,23 +380,41 @@ step swapped (`re.redeem` or `swap.aggregator` instead of
 
 ### 7.1 Flash-unwind PT loop (primary)
 
-Parameters: `market`, `pt`, `yt`, `underlying` (USD3 | reUSD), `redeemRoute`.
+**Every unwind uses a Morpho flash loan** (§2). One fee-free loan covers the
+whole debt, so the position closes in a single pass. That's no repeated
+withdraw/repay rounds, the gas cost doesn't grow with leverage, and nothing is
+left at a worse health factor midway. The partial and YT-shortfall unwinds
+(§6.3, §7.3) and USDT-debt loops use the same flash structure.
+
+Parameters: `market` (PT-USD3/USDC A or B, PT-USD3/USDT, PT-reUSD/USDC), `yt`
+amount, `minOut`, and the swap route for USDT markets.
 
 ```
-morpho.flashLoan(USDC, amount = debt(market) × 1.0005 buffer)
+morpho.accrueInterest(market)
+wallet.pull(YT, = collateral)                      [one-time approval, no extra signature]
+morpho.flashLoan(loanToken, amount = debt(market) × 1.0001)
+  ├─ loanToken.approve(Morpho, all)
   ├─ morpho.repay(market, shares = all, onBehalf = EOA)
   ├─ morpho.withdrawCollateral(market, all, onBehalf = EOA, receiver = executor)
-  ├─ pendle.redeemPY(PT, YT) → SY-USD3         [needs YT ≥ PT pre-maturity]
-  ├─ pendle.redeemSY(all SY) → USDC            [SY-USD3 redeems via 3Jane; minOut = previewRedeem × 0.999]
-  └─ (flash loan repaid automatically from executor USDC)
+  ├─ pendle.redeemPY(PT, YT) → SY-USD3             [needs YT ≥ PT pre-maturity]
+  ├─ pendle.redeemSY(all SY) → USDC                [SY-USD3 redeems via 3Jane]
+  ├─ (USDT market only) swap.aggregator(USDC → USDT, quoted to buy ≈ debt × 1.0010)
+  │     guard.minBalance(USDT, ≥ debt × 1.0002)
+  └─ (flash loan repaid from the executor's loanToken)
 guard.zeroDebt(market)
-guard.minBalance(USDC, userMinOut)
-wallet.sweep([USDC, USD3, PT, YT])
+wallet.sweep([USDC, USDT, PT, YT, SY, USD3])
 ```
 
-Pulling YT: if there's YT in the EOA, `wallet.pull(YT, full balance)` is added
-before the flash loan. It uses the one-time approval from setup, so there's no
-extra signature.
+**USDT-debt markets:** SY-USD3 only pays out USDC or USD3, so the template sells
+just enough USDC to repay the USDT flash loan. Everything else comes back as
+USDC, plus about 0.1% of the debt as leftover USDT.
+- **Sizing the swap:** the quote targets debt + 0.10%, while the on-chain guard
+  only requires debt + 0.02%. That leaves room for the route to drift between
+  quote and execution.
+- **If the pre-sign simulation trips the guard,** the app re-quotes with more
+  headroom (0.10% → 0.30% → 0.60%) before asking you to sign.
+- **Fork test:** a real 688k-USDT position returned about 105.5k USDC and about
+  680 USDT.
 
 **Result:** one transaction leaves you with pure USDC (equity = collateral value
 − debt − slippage) and zero debt, with the YT burned.
@@ -405,22 +423,13 @@ extra signature.
 flash loan and withdrawal are sized to the YT held, and the result is either
 USDC plus unlevered PT in your wallet, or a smaller, safer loop.
 
-### 7.2 Iterative unwind (no flash loan)
+### 7.2 Iterative unwind (fallback only)
 
-This mirrors your manual process inside one transaction:
-
-```
-repeat k times:
-  morpho.withdrawCollateral(amount = maxWithdrawable(market, targetHF))
-  pendle.redeemPY → pendle.redeemSY → threejane.redeemUSD3   [withdrawal capped at YT held]
-  morpho.repay(all USDC held)
-final: withdraw remaining collateral, convert, sweep
-```
-
-`k` is computed off-chain from the LTV: each round frees about `(1 − LTV/LLTV_target)`
-of the remaining position, so high-leverage loops need many rounds and much more
-gas. The UI shows the gas comparison with the flash variant. Use this mode only
-if a flash loan isn't available for the loan asset.
+This is only used if a flash loan is ever unavailable for the loan asset. Morpho
+currently holds about 135M USDC and 27.7M USDT for flash loans, so it isn't
+built in v1. It would repeat withdraw → redeem → repay `k` times inside one
+transaction, each time staying above a target health factor. That costs much
+more gas than §7.1 and grows with leverage.
 
 ### 7.3 Partial deleverage
 
@@ -432,8 +441,9 @@ sized to a target leverage or HF.
 ```
 wallet.pull(USDC equity)
 morpho.flashLoan(USDC, amount = equity × (L − 1))
-  ├─ threejane.depositUSD3(all USDC) → USD3       (or re.mint / swap for reUSD)
-  ├─ pendle.mintPY(all USD3) → PT + YT            (YT swept to EOA; no AMM buy)
+  ├─ (USDT market) swap.aggregator(USDT → USDC, all flash)  + guard.minBalance
+  ├─ pendle.SY.deposit(all USDC) → SY-USD3        (deposits into USD3; subject to 3Jane's cap)
+  ├─ pendle.mintPY(all SY) → PT + YT              (YT to EOA; no AMM buy)
   ├─ morpho.supplyCollateral(all PT, onBehalf)
   └─ morpho.borrow(flashAmount, onBehalf, receiver = executor)
 guard.healthFactor(market, ≥ targetHF)
@@ -562,10 +572,17 @@ reviewed manually. **No address is trusted from an API.**
 - **Verified on-chain (2026-10-30):**
   - For Pendle: `YT.PT()`, `YT.SY()`, `expiry()` and SY `getTokensIn`/`getTokensOut`.
   - For Morpho: market parameters via `idToMarketParams`.
-- **Contents:** USDC, USD3, reUSD; Morpho Blue; PT-USD3-17DEC2026 and
-  PT-reUSD-10DEC2026 (PT, YT, SY); and the Morpho USDC markets for each.
-  - PT-USD3 has two markets: A and B, both 86% LLTV, with different oracles.
-  - PT-reUSD has one: 91.5% LLTV.
+- **Contents:** USDC, USDT, USD3, reUSD; Morpho Blue; PT-USD3-17DEC2026 and
+  PT-reUSD-10DEC2026 (PT, YT, SY); and their Morpho markets. **All are supported:**
+  - PT-USD3/USDC **A** (`0xf8c5…`) and **B** (`0xecab…`): both 86% LLTV, with
+    different oracles.
+  - PT-USD3/**USDT** (`0x37a5…`): 91.5% LLTV.
+  - PT-reUSD/USDC (`0x1e9d…`): 91.5% LLTV.
+- **Aggregators:** the 0x AllowanceHolder (`0x0000…2734`) and the KyberSwap
+  MetaAggregationRouterV2 (`0x6131…37b5`). Routes come from
+  [`scripts/quote.mjs`](../scripts/quote.mjs): 0x when `ZEROX_API_KEY` is set
+  (free tier at dashboard.0x.org), otherwise KyberSwap. The frontend uses the
+  same logic.
 - **Excluded on purpose:** the Pendle router and market addresses are listed
   under `neverAllowlisted`.
 - **Sync:** `contracts/config/MainnetConfig.sol` holds the same addresses for
@@ -609,15 +626,28 @@ loan always repaid), then an external review before moving significant size.
   flash-callback gating, Pendle router rejected, PT/YT recipients restricted,
   `transferFrom` limited to the owner, Morpho receivers and `onBehalf` pinned,
   `setAuthorization` blocked from plans, patch bounds checked.
-- **Fork tests** (`test/fork/PtUsd3Loop.t.sol`, latest mainnet block):
-  - `test_flashUnwind_realPosition`: impersonates a real market A borrower
-    (597k PT, 447k USDC debt, HF 1.10) and fully unwinds in one transaction.
-    Debt 0, collateral 0, about **149.8k USDC** returned, YT consumed exactly,
-    Executor empty.
-  - `test_enterThenFlashUnwind`: opens a 3x loop from 10k USDC, then unwinds a
-    day later. **9,982 USDC** came back (−0.18%, mostly a day of borrow interest).
-  - `test_matchedUnwind_ytShortfall`: with 40% of the YT moved away, it only
-    withdraws matched PT. Debt is reduced, HF goes up, and nothing is sold.
+- **Fork tests** (latest mainnet block, real positions impersonated):
+  - `test/fork/PtUsd3Usdc.t.sol` (`pnpm test:fork`):
+    - **Market A real position:** 597k PT, 447k USDC debt, HF 1.10. Fully
+      unwound in one transaction, with **149.8k USDC** returned.
+    - **Market B real position:** 1.26M PT, 1.03M USDC debt, HF 1.02. Fully
+      unwound, with **229.2k USDC** returned.
+    - **Enter then exit, A and B:** a 3x loop from 10k USDC, unwound a day later,
+      returned 9,982 and 9,989 USDC.
+    - **YT shortfall:** a matched unwind with 40% of the YT missing. Debt is
+      reduced, HF goes up, and nothing is sold.
+  - `test/fork/PtUsd3Usdt.t.sol` (`pnpm test:fork:aggregator`, live
+    aggregator routes via `vm.ffi`; ffi is enabled only in this test profile):
+    - **USDT real position:** 793k PT, 688k USDT debt. It sold about 688k USDC
+      for USDT through KyberSwap inside the flash loan, and returned **about
+      105.5k USDC** plus about 680 USDT.
+    - These tests use the simulate-then-re-quote loop from §8. 8 consecutive
+      runs passed. Runs can still fail on the free public RPC ("block not
+      found"); use your own RPC endpoint.
+    - **Enter then exit, USDT:** USDT is flash-loaned and swapped to USDC on
+      entry, then swapped back on exit. The round trip lost less than 0.01%.
+  - In every test: debt and collateral end at 0, the YT is consumed exactly,
+    and the Executor ends empty.
   - The entry tests mock USD3's deposit limit when the live cap is full, and log
     when they do.
 - **Compiler (M1):** golden tests from Plan JSON to calldata, checked against
@@ -659,6 +689,12 @@ loan always repaid), then an external review before moving significant size.
 6. **Wallet:** Rabby, with the Ledger attached. No other connectors (§3).
 7. **Hosting:** local only, served on 127.0.0.1 from your own clone. No public
    or IPFS deploy (§3).
+8. **Markets:** PT-USD3/USDC A and B, plus PT-USD3/USDT, are all supported.
+   The Positions page detects which ones you're in.
+9. **Stablecoin swaps:** a major aggregator (0x by default, KyberSwap as the
+   keyless fallback) instead of a single DEX pool. Only USDC/USDT are swapped,
+   never Pendle assets.
+10. **Unwinds use flash loans** (a single pass) in every template.
 
 ### Answered during M0
 - **SY-USD3 → USDC directly:** yes. `redeemSY(tokenOut = USDC)` replaces the
@@ -670,5 +706,6 @@ loan always repaid), then an external review before moving significant size.
 ### Still open
 1. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
    decides whether exits use `re.redeem` or a swap (M3).
-2. **Which PT-USD3 market are your loops in,** A (`0xf8c5…`) or B (`0xecab…`)?
-   Both are supported, and the Positions page will detect it.
+2. **0x API key:** the fork tests used KyberSwap because there's no key in this
+   environment. Set `ZEROX_API_KEY` to make 0x the default, and to run the USDT
+   tests against 0x routes.

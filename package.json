@@ -4,12 +4,15 @@
   "type": "module",
   "scripts": {
     "build": "hardhat build",
-    "test": "hardhat test solidity",
+    "test": "hardhat test solidity test/CovenantExecutor.t.sol test/fork/PtUsd3Usdc.t.sol",
     "test:unit": "hardhat test solidity test/CovenantExecutor.t.sol",
-    "test:fork": "hardhat test solidity test/fork/PtUsd3Loop.t.sol"
+    "test:fork": "hardhat test solidity test/fork/PtUsd3Usdc.t.sol",
+    "test:fork:aggregator": "hardhat test solidity --test-profile aggregator test/fork/PtUsd3Usdt.t.sol",
+    "quote": "node scripts/quote.mjs"
   },
   "devDependencies": {
     "forge-std": "github:foundry-rs/forge-std#v1.9.7",
-    "hardhat": "3.21.2"
+    "hardhat": "3.21.2",
+    "viem": "2.21.0"
   }
 }
