@@ -8,7 +8,13 @@
     "test:unit": "hardhat test solidity test/CovenantExecutor.t.sol",
     "test:fork": "hardhat test solidity test/fork/PtUsd3Usdc.t.sol",
     "test:fork:aggregator": "hardhat test solidity --test-profile aggregator test/fork/PtUsd3Usdt.t.sol",
-    "quote": "node scripts/quote.mjs"
+    "quote": "node scripts/quote.mjs",
+    "sync": "hardhat build && node scripts/export-artifacts.mjs",
+    "start": "pnpm --filter covenant-app start",
+    "dev": "pnpm --filter covenant-app dev",
+    "fork": "hardhat node --fork ${MAINNET_RPC_URL}",
+    "test:app": "pnpm --filter covenant-app test",
+    "test:app:integration": "pnpm --filter covenant-app test:integration"
   },
   "devDependencies": {
     "forge-std": "github:foundry-rs/forge-std#v1.9.7",

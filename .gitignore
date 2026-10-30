@@ -9,3 +9,6 @@ artifacts/
 cache/
 out/
 types/
+app/dist/
+app/test-results/
+app/playwright-report/
