@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** Draft v0.1 · **Owner:** fish · **Date:** 2026-10-29
+**Status:** Draft v0.2 · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -182,26 +182,28 @@ function execute(Call[] calldata calls, bytes32 planHash) external payable onlyO
 
 ### 5.2 Position ownership on Morpho
 
-Two supported modes, chosen per market:
+**Decision: positions stay under your EOA, with a one-time standing authorization.**
 
-- **Mode A: the EOA owns the position (existing loops).** Morpho Blue lets the
-  EOA authorize the Executor (`setAuthorization`). Anyone can `repay` on your
-  behalf, but `withdrawCollateral` and `borrow` on your behalf need that
-  authorization. To avoid leaving a standing authorization, the plan **starts**
-  with `setAuthorizationWithSig(executor, true)` and **ends** with
-  `setAuthorizationWithSig(executor, false)`. Both are EIP-712 signatures the
-  Ledger can display clearly, signed just before the transaction with nonces
-  `n` and `n+1`.
-  - Signing flow: 2 typed-data signatures + 1 transaction. All three happen
-    together in a single "Sign" flow in the UI.
-- **Mode B: the Executor owns the position (new loops).** Opening loops through
-  the Executor puts the position under the Executor address, so no
-  authorization dance is needed. The trade-off: the position isn't visible
-  under your EOA in protocol UIs. Covenant has its own positions view.
+- **One-time setup:** a single transaction from the Ledger,
+  `morpho.setAuthorization(executor, true)`. After that, every unwind, entry or
+  roll is **exactly one transaction and one signature**.
+- Anyone can `repay` on your behalf. The authorization is what lets the Executor
+  `withdrawCollateral` and `borrow` on your behalf.
+- **No migration:** existing loops keep working as they are and stay visible in
+  the Morpho app.
+- **Why the standing authorization is acceptable:** the Executor only does what
+  its owner (your Ledger) signs, so this is the same trust as the Executor
+  owning the positions outright. It covers all your Morpho Blue markets, so the
+  Executor's owner and callback gating (§5.1) are what protect them.
+- **Revoke any time:** Settings has a **Revoke** button
+  (`setAuthorization(executor, false)`). Deploying a new Executor version means
+  revoking the old one and authorizing the new one.
 
-A one-time **Migrate** template moves an existing position from Mode A to Mode B
-(flash loan, repay on the EOA position, withdraw, resupply under the Executor,
-borrow, repay the flash loan).
+Alternatives rejected for being more complex:
+- Authorizing and revoking inside every transaction (`setAuthorizationWithSig`)
+  costs 2 extra typed-data signatures each time.
+- Moving positions to be owned by the Executor needs a migration, and the
+  positions disappear from the Morpho app.
 
 ### 5.3 Adapters vs. raw calls
 
@@ -221,7 +223,7 @@ simulation preview.
 
 | Block | Does | Notes |
 |---|---|---|
-| `wallet.pull` | Move tokens from the EOA into the Executor | Permit2 `permitTransferFrom` (typed-data sig) or an existing approval |
+| `wallet.pull` | Move tokens from the EOA into the Executor | Default: `transferFrom` using a one-time approval given during setup (YT, PT, USDC, USD3, reUSD), so no extra signature per transaction. Optional: Permit2 typed-data signature for tokens you haven't approved |
 | `wallet.sweep` | Send all balances of listed tokens back to the EOA | Always added automatically as the final block |
 | `erc20.approve` | Exact-amount approval from the Executor | Inserted automatically by the compiler before blocks that need it |
 | `erc4626.deposit` / `redeem` | Generic vault in/out | Covers many yield tokens. Uses `previewRedeem` for minOut |
@@ -229,6 +231,7 @@ simulation preview.
 | `guard.minBalance` | Revert if the Executor's balance of a token < min | |
 | `guard.healthFactor` | Revert if a Morpho position's HF < target after the step | Reads the oracle and LLTV on-chain |
 | `guard.maxDebt` / `guard.zeroDebt` | Assert debt bounds | Used by unwind templates |
+| `guard.maxPriceImpact` | Revert if an AMM or aggregator leg loses more than `bps` against its oracle or quoted price | Default 50 bps on the PT-shortfall swap |
 
 ### 6.2 Morpho Blue
 
@@ -239,7 +242,7 @@ simulation preview.
 | `morpho.borrow` | `borrow(params, assets, 0, onBehalf, receiver)` | |
 | `morpho.repay` | `repay(params, 0, shares, onBehalf, "")` | `"all"` repays **by shares** so no dust is left behind |
 | `morpho.flashLoan` | `flashLoan(token, assets, data)` | Container block: child blocks run inside the callback and repayment is checked |
-| `morpho.authorize` | `setAuthorizationWithSig` | Mode A only. Added automatically in a begin/end pair |
+| `morpho.authorize` | `setAuthorization(executor, bool)` | Sent from the EOA as a one-time setup or revoke transaction. Not part of normal plans |
 
 Markets are identified by `MarketParams` (loan token, collateral token, oracle,
 IRM, LLTV), resolved from the market id in the registry.
@@ -253,10 +256,27 @@ IRM, LLTV), resolved from the market id in the registry.
 | `pendle.swapPtToToken` / `swapTokenToPt` | Trade on the Pendle AMM | Has price impact. Quote via the Pendle API. Used when YT < PT, or to enter a PT-only loop |
 | `pendle.swapYt*` | Buy or sell YT | Optional, for fully exiting YT exposure |
 
-**PT/YT mismatch handling:** if the withdrawn PT is more than the YT held, the
-compiler splits the step: `redeemPY(min(PT, YT))` plus `swapPtToToken(rest)`, and
-shows the AMM price impact for the remainder. The UI flags it in yellow when
-price impact > 0.3%.
+**PT/YT shortfall handling (required, not an edge case).** Before maturity, your
+YT balance won't always cover the PT collateral, so every unwind template
+handles a shortfall by default:
+
+1. `redeemPY(YT held)`: redeem as much as the YT covers. The amount is known at
+   signing time, because the YT is pulled from the EOA with an exact Permit2
+   amount.
+2. Then, for the PT that's left (`balance(PT)` at runtime), the compiler quotes
+   two routes and picks the cheaper one:
+   - (a) `swapPtToToken`: sell the leftover PT on the Pendle AMM.
+   - (b) `swapTokenToYt` with part of the proceeds, then `redeemPY` on the rest.
+3. Guard `guard.maxPriceImpact(bps)` reverts the whole transaction if the AMM
+   leg costs more than the limit. The default is 50 bps, editable per plan.
+4. **Shown before signing:** the shortfall in PT, the chosen route, and its cost
+   in USDC.
+5. **Thin AMM liquidity:** if the leftover can't be sold within the limit, the
+   template offers a **partial unwind**. It sizes the flash loan and collateral
+   withdrawal to the most PT that can be exited within the limit, keeps the
+   health factor at or above target, and leaves the rest of the position open.
+
+After maturity, the shortfall goes away: PT redeems on its own.
 
 **Maturity awareness:** the registry stores maturity. After maturity,
 `redeemPY` becomes PT-only redemption automatically.
@@ -298,21 +318,22 @@ step swapped (`re.redeem` or `swap.aggregator` instead of
 Parameters: `market`, `pt`, `yt`, `underlying` (USD3 | reUSD), `redeemRoute`.
 
 ```
-morpho.authorize(true)                         [Mode A only]
 morpho.flashLoan(USDC, amount = debt(market) × 1.0005 buffer)
   ├─ morpho.repay(market, shares = all, onBehalf = EOA)
   ├─ morpho.withdrawCollateral(market, all, onBehalf = EOA, receiver = executor)
-  ├─ pendle.redeemPY(min(PT, YT)) → USD3       [+ swapPtToToken(rest) if YT short]
+  ├─ pendle.redeemPY(YT held) → USD3           [skipped if no YT]
+  ├─ pendle.swapPtToToken(balance(PT)) → USD3  [only if YT short; see §6.3]
+  ├─ guard.maxPriceImpact(50 bps)
   ├─ threejane.redeemUSD3(all USD3) → USDC     [minOut = previewRedeem × 0.999]
   └─ (flash loan repaid automatically from executor USDC)
 guard.zeroDebt(market)
 guard.minBalance(USDC, userMinOut)
-morpho.authorize(false)                        [Mode A only]
 wallet.sweep([USDC, USD3, PT, YT])
 ```
 
-Pulling YT: if the YT is in the EOA, a `wallet.pull(YT, amount)` via Permit2 is
-added before the flash loan.
+Pulling YT: if there's YT in the EOA, `wallet.pull(YT, full balance)` is added
+before the flash loan. It uses the one-time approval from setup, so there's no
+extra signature.
 
 **Result:** one transaction leaves you with pure USDC (equity = collateral value
 − debt − slippage) and zero debt, with the YT burned.
@@ -372,9 +393,9 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
 2. **Hash match:** the UI shows the transaction hash it expects. The Ledger shows
    the same hash on screen in blind-signing mode. You confirm they match.
 3. **ERC-7730 clear-signing descriptor** for `CovenantExecutor` (v1.1): it can at
-   least clearly display the function, the `planHash` and the value. The
-   `setAuthorizationWithSig` and Permit2 typed-data signatures already
-   clear-sign on Ledger.
+   least clearly display the function, the `planHash` and the value. The one-time
+   setup transactions (`setAuthorization`, ERC-20 `approve`) are simple calls
+   that the Ledger can show clearly.
 4. **Simulation is mandatory:** the Sign button is disabled until a simulation
    passes against the latest block. Re-simulation runs automatically if more
    than ~3 blocks pass or the inputs change.
@@ -403,11 +424,16 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
    - Validation inline: an unwired input, a missing approval (auto-fixed),
      flash loan not repaid, PT/YT mismatch, insufficient 3Jane liquidity.
 3. **Review & Sign:** the decoded plan, the diff, the hash, then the sequential
-   Ledger prompts (typed-data signatures, then the transaction).
+   Ledger prompt: normally a single transaction.
 4. **Templates:** saved plans with parameters. Import/export as JSON, and share
    by URL fragment (no server).
 5. **Settings:** RPC, simulation provider key, private RPC toggle, the Executor
    address and allowlist, deploying the Executor.
+   - **One-time setup wizard:** deploy the Executor, call
+     `setAuthorization(executor, true)` on Morpho, and approve the loop tokens
+     to the Executor. That's roughly 3–6 Ledger transactions, done once.
+   - **Revoke:** one-click buttons to remove the Morpho authorization and
+     the token approvals.
 
 ### 9.2 Speed features (the "swiftly" requirement)
 - From the Positions page, **Unwind → Review → Sign** takes 3 clicks.
@@ -450,7 +476,7 @@ truth during simulation.
 |---|---|
 | Someone else calls the Executor | `onlyOwner`. Callbacks are gated by sender **and** a transient "executing" flag |
 | Malicious callback re-enters mid-plan | Transient reentrancy lock. Callbacks only run inner calls passed in by `execute` |
-| A standing Morpho authorization gets abused later | Mode A authorizes and revokes in the same transaction. Mode B needs none |
+| The standing Morpho authorization gets abused | Only the Executor holds it, and only the owner can drive the Executor. Callbacks are gated (§5.1). There's a one-click Revoke. The Executor is immutable, so new versions mean revoke-then-reauthorize |
 | Funds left in the Executor | Final sweep plus an "ends empty" invariant |
 | Leftover approvals | Exact amounts, reset at the end. Permit2 with short expiry |
 | Bad quote or sandwich | On-chain `minOut` per swap or redeem. Private RPC. Simulation at the latest block |
@@ -488,20 +514,22 @@ loan always repaid), then an external review before moving significant size.
 
 ---
 
-## 14. Open questions (need answers before M0)
+## 14. Decisions and open questions
 
-1. **Lending venue:** are the PT-USD3 loops on **Morpho Blue**? (The spec assumes
-   it.) If Euler or another venue, swap in its blocks. Euler's EVC batch is
-   also a good fit.
-2. **Position ownership:** keep the existing EOA positions (Mode A, two extra
-   typed-data signatures per transaction) or migrate once to the Executor (Mode B)?
-3. **YT coverage:** does the YT in your wallet fully cover the PT collateral, or
-   will part of the PT need to go through the Pendle AMM?
-4. **Does Pendle's SY-USD3 support USDC as `tokenOut` directly?** If so,
-   `redeemPY` + `redeemUSD3` collapse into one router call.
-5. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
+### Decided (2026-10-30)
+1. **Lending venue:** Morpho Blue.
+2. **Position ownership:** the simpler option. Positions stay under the EOA,
+   with a one-time standing authorization for the Executor (§5.2).
+3. **YT coverage:** YT may not always cover the PT, so shortfall handling is a
+   default part of every unwind (§6.3).
+4. **Chain:** Ethereum mainnet only, including for the reUSD loops.
+
+### Still open
+1. **Does Pendle's SY-USD3 support USDC as `tokenOut` directly?** If so,
+   `redeemPY` + `redeemUSD3` collapse into one router call. Check on-chain during M0.
+2. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
    partial unwind needed?
-6. **reUSD mint/redeem:** permissioned? Instant or queued? Which chain(s) are
-   your reUSD loops on? (PT-reUSD markets exist on Ethereum and Monad.)
-7. **Wallet path:** WebHID direct, Rabby + Ledger, or Ledger Live?
-8. **Hosting:** localhost only, or an IPFS deploy?
+3. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
+   decides whether exits use `re.redeem` or a swap.
+4. **Wallet path:** WebHID direct, Rabby + Ledger, or Ledger Live?
+5. **Hosting:** localhost only, or an IPFS deploy?
