@@ -2,13 +2,15 @@ import type { Page } from "@playwright/test";
 
 /** Real market A borrower, impersonated on the fork. */
 export const OWNER = "0xa95d6286853320487cB0897304ad8A210F8D12c4" as const;
+/** Real market B borrower (already holds more YT than PT), used by the builder test. */
+export const OWNER_B = "0x7A27F9586d0895F045b80B3Fb1D9D6eF4D54e9Bc" as const;
 export const RPC = "http://127.0.0.1:8545";
 
 /**
  * A stand-in for Rabby: announces itself over EIP-6963 as io.rabby and forwards every request
  * to the fork node, where OWNER is impersonated (so eth_sendTransaction "signs").
  */
-export async function installMockRabby(page: Page) {
+export async function installMockRabby(page: Page, account: string = OWNER) {
   await page.addInitScript(
     ({ owner, rpc }) => {
       let id = 0;
@@ -41,6 +43,6 @@ export async function installMockRabby(page: Page) {
       window.addEventListener("eip6963:requestProvider", announce);
       announce();
     },
-    { owner: OWNER, rpc: RPC },
+    { owner: account, rpc: RPC },
   );
 }

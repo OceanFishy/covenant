@@ -8,9 +8,12 @@ import {
 } from "viem";
 import { erc20Abi, executorAbi, morphoAbi } from "./abis";
 import type { Plan } from "./compiler/types";
-import { MORPHO, label, tokenInfo } from "./registry";
+import { withChainLock } from "./chain";
+import { MORPHO, label, tokenInfo, type Market } from "./registry";
 
 export type BalanceChange = { token: Address; symbol: string; decimals: number; before: bigint; after: bigint };
+
+export type PositionAfter = { market: Market; collateral: bigint; borrowShares: bigint; health: bigint };
 
 export type SimulationResult =
   | {
@@ -18,9 +21,12 @@ export type SimulationResult =
       block: bigint;
       gasUsed: bigint;
       changes: BalanceChange[];
+      /** The plan's primary market (plan.market). */
       collateralAfter: bigint;
       borrowSharesAfter: bigint;
       healthAfter: bigint;
+      /** Every market in plan.markets. */
+      positions: PositionAfter[];
       method: "eth_simulateV1" | "dev-fork";
     }
   | { ok: false; block: bigint; error: string; revertData?: Hex; method: "eth_simulateV1" | "dev-fork" };
@@ -35,7 +41,12 @@ export function decodeRevert(data: Hex | undefined, depth = 0): string {
       case "CallFailed": {
         const [index, target, reason] = a as [bigint, Address, Hex];
         const inner = depth < 4 ? decodeRevert(reason, depth + 1) : "…";
-        return `call #${index} to ${label(target)} failed: ${inner}`;
+        // Morpho pulls the flash loan back with transferFrom after the callback.
+        const hint =
+          target.toLowerCase() === MORPHO.toLowerCase() && /^transferFrom (reverted|returned false)$/.test(inner)
+            ? " (the Executor couldn't repay the flash loan: the blocks inside it must end with at least the borrowed amount of the loan token)"
+            : "";
+        return `call #${index} to ${label(target)} failed: ${inner}${hint}`;
       }
       case "BalanceTooLow": {
         const [token, bal, min] = a as [Address, bigint, bigint];
@@ -56,7 +67,7 @@ export function decodeRevert(data: Hex | undefined, depth = 0): string {
 
 function tokensFor(plan: Plan): Address[] {
   const m = plan.market;
-  const list = [m.series.tokenOut, m.loanToken, m.series.pt, m.series.yt];
+  const list = plan.tokens ?? [m.series.tokenOut, m.loanToken, m.series.pt, m.series.yt];
   return list.filter((a, i) => list.findIndex((b) => b.toLowerCase() === a.toLowerCase()) === i);
 }
 
@@ -66,24 +77,35 @@ function readCalls(plan: Plan, tokens: Address[]): RawCall[] {
   return tokens.map((t) => ({ to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: "balanceOf", args: [plan.owner] }) }));
 }
 
-function stateCalls(plan: Plan): RawCall[] {
-  return [
-    { to: MORPHO, data: encodeFunctionData({ abi: morphoAbi, functionName: "position", args: [plan.market.id, plan.owner] }) },
-    {
-      to: plan.executor,
-      data: encodeFunctionData({ abi: executorAbi, functionName: "healthFactor", args: [plan.market.id, plan.owner] }),
-    },
-  ];
+function marketsFor(plan: Plan): Market[] {
+  return plan.markets?.length ? plan.markets : [plan.market];
 }
 
-function decodeState(results: Hex[]) {
-  const [, borrowSharesAfter, collateralAfter] = decodeFunctionResult({
-    abi: morphoAbi,
-    functionName: "position",
-    data: results[0],
-  }) as readonly [bigint, bigint, bigint];
-  const healthAfter = decodeFunctionResult({ abi: executorAbi, functionName: "healthFactor", data: results[1] }) as bigint;
-  return { borrowSharesAfter, collateralAfter, healthAfter };
+/** Position + health reads for every market, two calls each. */
+function stateCalls(plan: Plan): RawCall[] {
+  return marketsFor(plan).flatMap((m) => [
+    { to: MORPHO, data: encodeFunctionData({ abi: morphoAbi, functionName: "position", args: [m.id, plan.owner] }) },
+    { to: plan.executor, data: encodeFunctionData({ abi: executorAbi, functionName: "healthFactor", args: [m.id, plan.owner] }) },
+  ]);
+}
+
+function decodeState(plan: Plan, results: Hex[]) {
+  const positions = marketsFor(plan).map((market, i): PositionAfter => {
+    const [, borrowShares, collateral] = decodeFunctionResult({
+      abi: morphoAbi,
+      functionName: "position",
+      data: results[2 * i],
+    }) as readonly [bigint, bigint, bigint];
+    const health = decodeFunctionResult({ abi: executorAbi, functionName: "healthFactor", data: results[2 * i + 1] }) as bigint;
+    return { market, collateral, borrowShares, health };
+  });
+  const primary = positions.find((p) => p.market.id === plan.market.id) ?? positions[0];
+  return {
+    positions,
+    borrowSharesAfter: primary.borrowShares,
+    collateralAfter: primary.collateral,
+    healthAfter: primary.health,
+  };
 }
 
 function changes(tokens: Address[], before: Hex[], after: Hex[]): BalanceChange[] {
@@ -124,7 +146,7 @@ async function simulateV1(
   }
   const before = out.slice(0, reads.length).map((c) => c.returnData);
   const after = out.slice(reads.length + 1, reads.length * 2 + 1).map((c) => c.returnData);
-  const st = decodeState(out.slice(reads.length * 2 + 1).map((c) => c.returnData));
+  const st = decodeState(plan, out.slice(reads.length * 2 + 1).map((c) => c.returnData));
   return { ok: true, block, gasUsed: BigInt(tx.gasUsed), changes: changes(tokens, before, after), ...st, method: "eth_simulateV1" };
 }
 
@@ -146,7 +168,7 @@ async function simulateDevFork(client: PublicClient, plan: Plan, tokens: Address
     }
     const receipt = await client.waitForTransactionReceipt({ hash });
     const after = await readAll(readCalls(plan, tokens));
-    const st = decodeState(await readAll(stateCalls(plan)));
+    const st = decodeState(plan, await readAll(stateCalls(plan)));
     return { ok: true, block, gasUsed: receipt.gasUsed, changes: changes(tokens, before, after), ...st, method: "dev-fork" };
   } finally {
     await req({ method: "evm_revert", params: [snap] });
@@ -167,7 +189,9 @@ function findRevertData(e: unknown): Hex | undefined {
 export async function simulatePlan(client: PublicClient, plan: Plan, stateOverrides?: StateOverrides): Promise<SimulationResult> {
   const tokens = tokensFor(plan);
   const chainId = await client.getChainId();
-  return chainId === 31337 ? simulateDevFork(client, plan, tokens) : simulateV1(client, plan, tokens, stateOverrides);
+  return chainId === 31337
+    ? withChainLock(() => simulateDevFork(client, plan, tokens))
+    : simulateV1(client, plan, tokens, stateOverrides);
 }
 
 /**

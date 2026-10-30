@@ -31,6 +31,7 @@ export function Header() {
       </a>
       <nav className="row">
         <a href="#/">Positions</a>
+        <a href="#/builder">Builder</a>
         <a href="#/setup">Setup</a>
         <a href="#/access">Access</a>
       </nav>

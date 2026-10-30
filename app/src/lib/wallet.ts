@@ -1,5 +1,5 @@
 import { createWalletClient, custom, getAddress, type Address, type EIP1193Provider, type Hex, type WalletClient } from "viem";
-import { chain, publicClient } from "./chain";
+import { chain, publicClient, withChainLock } from "./chain";
 
 /** EIP-6963 provider announcement. */
 export type ProviderDetail = {
@@ -48,8 +48,11 @@ export async function switchNetwork(c: Connection): Promise<void> {
 
 /** Sends one transaction through Rabby (→ Ledger) and waits for it to be mined. */
 export async function send(c: Connection, tx: { to?: Address; data: Hex }) {
-  const hash = await c.wallet.sendTransaction({ account: c.account, chain, to: tx.to, data: tx.data });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success") throw new Error(`transaction ${hash} reverted`);
-  return receipt;
+  // Hold the chain lock so a dev-fork simulation's evm_revert can't undo this transaction.
+  return withChainLock(async () => {
+    const hash = await c.wallet.sendTransaction({ account: c.account, chain, to: tx.to, data: tx.data });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") throw new Error(`transaction ${hash} reverted`);
+    return receipt;
+  });
 }

@@ -15,6 +15,10 @@ signature. Supported: PT-USD3 / USDC markets A and B, and PT-USD3 / USDT.
 - **M1 built:** the app (Positions, Review & Sign, Setup, Access/Revoke). It's
   tested with a TypeScript plan compiler on a mainnet fork, with `eth_simulateV1`
   against live mainnet, and end to end in a browser with a mock Rabby.
+- **M2 built:** the Builder (`#/builder`). Assemble any flow from 14 blocks (Morpho,
+  Pendle mint/redeem, stablecoin swaps, guards, flash loans), or start from a
+  template (unwind, deleverage, partial, enter, move a loop A → B). Then simulate
+  and sign. Flows can be saved, exported or shared.
 - **Not done yet:** a real mainnet run from a Ledger.
 - **Unaudited:** start with a small position.
 
@@ -74,6 +78,7 @@ app/src/lib/planner.ts                 picks full unwind / deleverage / partial 
 app/src/lib/simulate.ts                eth_simulateV1 (mainnet) or snapshot/revert (local fork)
 app/src/lib/access.ts                  Executor permissions + revoke transactions
 app/src/lib/mev.ts                     MEV-protected RPCs + Flashbots routing check
-app/src/pages/                         Positions, Review, Setup, Access
+app/src/lib/builder/                   Builder blocks, catalog, validation, compiler, templates, storage
+app/src/pages/                         Positions, Builder, Review, Setup, Access
 app/test/, app/e2e/                    unit, fork integration, browser E2E (+ screenshots)
 ```

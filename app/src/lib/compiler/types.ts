@@ -32,7 +32,7 @@ export type Swap = {
   minOut: bigint;
 };
 
-export type PlanKind = "unwind" | "deleverage" | "partial" | "enter";
+export type PlanKind = "unwind" | "deleverage" | "partial" | "enter" | "custom";
 
 export type Plan = {
   kind: PlanKind;
@@ -47,4 +47,8 @@ export type Plan = {
   data: Hex;
   /** Aggregator leg, if any (reused when rebuilding the same plan with a tighter guard). */
   swap?: Swap;
+  /** Every market the plan touches (simulation reports each); defaults to [market]. */
+  markets?: Market[];
+  /** Wallet tokens the simulation reports; defaults to the market's tokens. */
+  tokens?: Address[];
 };

@@ -135,3 +135,40 @@ details summary { cursor: pointer; color: var(--muted); margin-top: 8px; }
   .top { gap: 10px; padding: 10px 16px; }
   .grow-end { margin-left: 0; }
 }
+
+/* ---------------------------------------------------------------- builder */
+.page:has(.builder) { max-width: 1500px; }
+.builder { display: grid; grid-template-columns: 250px minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
+.palette { position: sticky; top: 70px; max-height: calc(100vh - 90px); overflow-y: auto; display: grid; gap: 6px; }
+.palette input { width: 100%; }
+.palette h4 { margin: 10px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.palette-item { display: grid; gap: 2px; text-align: left; width: 100%; padding: 8px 10px; border-left-width: 3px; }
+.canvas, .side { display: grid; gap: 16px; min-width: 0; }
+.title-input { font-weight: 600; font-size: 15px; width: 320px; }
+.chain { list-style: none; margin: 0; padding: 0; }
+.chain.nested { margin-left: 4px; }
+.dropzone { height: 8px; border-radius: 6px; transition: height 0.1s; }
+.dropzone.last { height: 14px; }
+.dropzone.over { height: 28px; background: var(--info-bg); outline: 2px dashed var(--accent); }
+.block { border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; background: var(--surface); }
+.block.selected { box-shadow: 0 0 0 2px var(--accent); }
+.block-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; }
+.block-body { padding: 0 10px 8px 30px; display: grid; gap: 4px; }
+.drag { cursor: grab; color: var(--muted); user-select: none; }
+.container { margin: 0 8px 8px 18px; padding: 6px; border: 1px dashed var(--border); border-radius: 8px; min-height: 40px; }
+button.icon { padding: 2px 7px; font-size: 12px; }
+.row.tight { gap: 6px; }
+input.num { width: 130px; }
+input.short { width: 70px; }
+.issues { margin: 0 0 8px; padding-left: 0; list-style: none; display: grid; gap: 2px; }
+.template { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.template:last-child { border-bottom: none; }
+.g-wallet { border-left-color: #8a8f99; }
+.g-morpho { border-left-color: #3355dd; }
+.g-pendle { border-left-color: #1f9d74; }
+.g-swap { border-left-color: #c77d12; }
+.g-guard { border-left-color: #b42318; }
+@media (max-width: 1100px) {
+  .builder { grid-template-columns: 1fr; }
+  .palette { position: static; max-height: none; }
+}

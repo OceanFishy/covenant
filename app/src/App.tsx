@@ -2,6 +2,7 @@ import { Component, type ReactNode } from "react";
 import { Header } from "./components/Header";
 import { useRoute } from "./hooks";
 import { AccessPage } from "./pages/Access";
+import { BuilderPage } from "./pages/Builder";
 import { PositionsPage } from "./pages/Positions";
 import { ReviewPage } from "./pages/Review";
 import { SetupPage } from "./pages/Setup";
@@ -38,6 +39,8 @@ function Routes() {
       return <AccessPage />;
     case "/setup":
       return <SetupPage />;
+    case "/builder":
+      return <BuilderPage params={params} key={params.get("flow") ?? "draft"} />;
     case "/review":
       return <ReviewPage params={params} key={params.toString()} />;
     default:

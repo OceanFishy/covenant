@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** v0.7 (M0 done, M1 built; awaiting a real-Ledger mainnet run) · **Owner:** fish · **Date:** 2026-10-30
+**Status:** v0.8 (M0 done; M1 and M2 built; awaiting a real-Ledger mainnet run) · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -129,31 +129,37 @@ you exposed to price moves and liquidation risk.
 
 | Term | Meaning |
 |---|---|
-| **Block** | One typed step with inputs, outputs and a compile function that emits one or more `Call`s. |
-| **Plan** | An ordered list of blocks with wired amounts. Serializable JSON that can be shared, diffed and saved as a template. |
-| **Amount ref** | How a block gets its amount: `fixed(x)`, `balance(token)`, `output(blockId)`, `pct(ref, bps)`, `debt(market)`, `collateral(market)`. Resolved **on-chain at execution time**, not at signing. |
-| **Guard** | An assertion block that reverts the whole transaction if it fails (min out, min health factor, the Executor ends with a zero balance, ...). |
-| **Template** | A saved plan with parameters (for example "Flash-unwind PT loop" with `market`, `pt`, `yt`, `redeemPath`). |
+| **Block** | One typed step (`app/src/lib/builder/types.ts`) that compiles to one or more Executor `Call`s, with approvals added automatically. |
+| **Flow** | An ordered list of blocks. A flash loan is a container whose children run inside the loan. It's serializable JSON, so it can be saved, exported or shared. |
+| **Amount** | `fixed` (a decimal in the block's token), `balance` (the Executor's balance at execution), `debt` (a market's live debt + bps), `collateral` (all collateral), or `allShares` (repay all by shares). Everything except `fixed` is resolved **on-chain at execution time** through the Executor's patch sources. |
+| **Guard** | A block that reverts the whole transaction if it fails: minimum received, no debt, minimum health factor. Swaps add their own output guard. |
+| **Template** | A flow generated from your position: unwind, deleverage, partial, enter, or move between markets. |
 
-### Plan JSON (sketch)
+### Flow JSON (as implemented)
 
 ```jsonc
 {
   "version": 1,
-  "chainId": 1,
+  "name": "Unwind PT-USD3 / USDC · A",
   "blocks": [
-    { "id": "fl",  "type": "morpho.flashLoan", "token": "USDC", "amount": { "debt": "mkt:PT-USD3/USDC" },
-      "inner": ["rp", "wc", "rpy", "rsy", "r3"] },
-    { "id": "rp",  "type": "morpho.repay",     "market": "mkt:PT-USD3/USDC", "amount": "all" },
-    { "id": "wc",  "type": "morpho.withdrawCollateral", "market": "mkt:PT-USD3/USDC", "amount": "all" },
-    { "id": "rpy", "type": "pendle.redeemPY",  "yt": "YT-USD3", "amount": { "output": "wc" } },
-    { "id": "rsy", "type": "pendle.redeemSY",  "sy": "SY-USD3", "amount": { "output": "rpy" }, "tokenOut": "USD3" },
-    { "id": "r3",  "type": "threejane.redeemUSD3", "amount": { "output": "rsy" }, "minOut": { "pctOfPreview": 9990 } },
-    { "id": "g1",  "type": "guard.minBalance", "token": "USDC", "min": "1000e6" },
-    { "id": "sw",  "type": "wallet.sweep",     "tokens": ["USDC", "USD3", "PT-USD3", "YT-USD3"] }
+    { "id": "b1", "type": "accrueInterest", "market": "PT-USD3-17DEC2026/USDC (A)" },
+    { "id": "b2", "type": "pull", "token": "<YT-USD3>", "amount": { "kind": "fixed", "value": "597246.159092" } },
+    { "id": "b3", "type": "flashLoan", "token": "<USDC>",
+      "amount": { "kind": "debt", "market": "PT-USD3-17DEC2026/USDC (A)", "bps": 10001 },
+      "children": [
+        { "id": "b4", "type": "repay", "market": "…(A)", "amount": { "kind": "allShares" } },
+        { "id": "b5", "type": "withdrawCollateral", "market": "…(A)", "amount": { "kind": "collateral" } },
+        { "id": "b6", "type": "redeemPY", "series": "PT-USD3-17DEC2026", "amount": { "kind": "balance" } },
+        { "id": "b7", "type": "redeemSY", "series": "PT-USD3-17DEC2026", "tokenOut": "<USDC>", "minOut": { "kind": "fixed", "value": "0" } }
+      ] },
+    { "id": "b8", "type": "guardNoDebt", "market": "…(A)" }
   ]
 }
 ```
+
+The builder's templates compile **byte-for-byte** to the same transaction as the
+tested template compiler. A unit test checks this for unwind, deleverage,
+partial and enter.
 
 ---
 
@@ -457,8 +463,16 @@ wallet.sweep
 
 ### 7.5 Roll PT maturity / Migrate market
 
-A flash loan closes market A and opens market B (for example PT-USD3-DEC →
-PT-USD3-MAR, or PT-USD3 → PT-reUSD) in one transaction. The old PT+YT are
+**Move between markets (built, M2):** for two markets with the same collateral
+and loan token, for example PT-USD3/USDC A → B, a flash loan repays all debt on
+the source market and withdraws all collateral. It then supplies the collateral
+to the destination, borrows there to repay the flash loan, and checks there's no
+debt left on the source and the destination's health factor. There's no Pendle
+step. The destination needs enough lender liquidity: A and B are both about 100%
+borrowed today, so simulation will show when a move can't fit.
+
+**Roll (M3):** a flash loan closes market A and opens market B (for example
+PT-USD3-DEC → PT-USD3-MAR, or PT-USD3 → PT-reUSD) in one transaction. The old PT+YT are
 **redeemed** and the new PT+YT are **minted**. Nothing is traded on Pendle, so a
 roll also needs YT ≥ PT for the old maturity.
 
@@ -524,16 +538,32 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
    collateral, debt, HF, LTV/LLTV, PT maturity, YT balance, the underlying's
    redeemable liquidity. Each row has one-click actions: **Unwind**, **Partial**,
    **Re-lever**, **Roll**.
-2. **Builder:**
-   - Left: the **block palette**, grouped by protocol and searchable (`/`
-     shortcut).
-   - Center: a **vertical chain** of block cards. Drag to reorder. Container
-     blocks (flash loan, repeat) show nested children. Amount inputs offer a
-     dropdown: *Fixed · All balance · Output of ▸ block · % of · Debt · Collateral*.
-   - Right: a **live simulation panel**: per-step token flow, final balances,
-     HF, gas, warnings.
-   - Validation inline: an unwired input, a missing approval (auto-fixed),
-     flash loan not repaid, PT/YT mismatch, insufficient 3Jane liquidity.
+2. **Builder** (`#/builder`, built in M2):
+   - **Left: the block palette.** 14 blocks grouped as Wallet, Morpho, Pendle,
+     Swap and Guard.
+     - **Search:** `/` focuses search, and Enter adds the top match. Title
+       matches rank first, so "redeem sy" adds *Redeem SY*.
+     - **Adding:** click a block to append it, or drag it to an exact spot.
+   - **Center: the chain.**
+     - **Arranging:** drag to reorder or into a flash loan (native HTML5
+       drag-and-drop, no library). ↑ ↓ ⧉ ✕ buttons give the same moves without
+       dragging.
+     - **Flash loans:** selecting one makes new blocks go inside it.
+     - **Editing:** each block has its own editors. Amount kinds are limited to
+       what that block supports.
+     - **Validation:** checks run instantly and show on each block:
+       - an empty or nested flash loan;
+       - an attempt to swap a Pendle asset;
+       - redeeming PT before maturity with no YT reaching the Executor;
+       - invalid amounts.
+   - **Right side:**
+     - **Start from:** templates built from your open positions, plus Enter.
+     - **Check & simulate:** the same `eth_simulateV1` path and re-quote ladder
+       as Review, re-simulated every block. A one-click "receive at least 99.5%"
+       adds guards from the simulation.
+     - **Sign:** the same Sign panel and gates as Review.
+   - **Flows:** saved in this browser, exported or imported as JSON, or shared
+     as a URL fragment (it only opens on your own local Covenant).
 3. **Review & Sign:** the decoded plan, the diff, the hash, then the sequential
    Ledger prompt: normally a single transaction.
 4. **Templates:** saved plans with parameters. Import/export as JSON, and share
@@ -587,11 +617,15 @@ in one click.
   immediately offers to revoke.
 
 ### 9.2 Speed features (the "swiftly" requirement)
-- From the Positions page, **Unwind → Review → Sign** takes 3 clicks.
-- Keyboard: `/` search blocks, `⌘↵` simulate, `⌘⇧↵` sign.
-- Templates prefilled from position data (market, amounts, YT balance).
-- Quotes refresh in the background. Simulation reruns every new block while the
-  Review screen is open.
+- **Unwind:** from the Positions page, **Unwind → Review → Sign** takes 3 clicks.
+  The same flow opens in the Builder from "Start from".
+- **Keyboard:** in the Builder, `/` searches blocks, Enter adds the top match,
+  and `⌘↵` / `Ctrl↵` simulates. Signing always takes an explicit click.
+- **Measured:** a full unwind assembled block by block from the palette (9
+  blocks, 4 market selections, 1 amount), then simulated, takes about **8–9 s**
+  in the automated E2E test. That leaves plenty of room against the 60 s goal for
+  a person.
+- **Background:** Review and Builder re-simulate every new block.
 
 ---
 
@@ -693,6 +727,19 @@ loan always repaid), then an external review before moving significant size.
     route; partial unwind (40% YT); look-alike Executor rejection; Revoke all.
   - **Production path:** an `eth_simulateV1` test runs against live mainnet,
     read-only, with the Executor placed via state overrides.
+- **Builder tests:**
+  - **Unit:** templates compile byte-for-byte to the plan compiler's output;
+    validation; search ranking; share-link round trip; the flash-repayment
+    error hint.
+  - **Integration (fork):** a real 597k-PT loop moved from market A to B in one
+    transaction, then unwound on B with a flow assembled block by block.
+  - **E2E:** builds the unwind from the palette, simulates, signs, and checks
+    the position closed.
+- **Dev-fork lock:** dev-fork simulation runs snapshot, send and revert. Every
+  simulation and every send in a tab share one lock, so a background
+  re-simulation can't revert your signed transaction. Two Covenant tabs on the
+  same fork can still interfere, so use one tab (or run E2E with `workers: 1`).
+  This doesn't apply on mainnet, where `eth_simulateV1` is stateless.
 - **E2E** (`app/e2e`, Playwright): the built app against a local fork, with a
   mock Rabby announced over EIP-6963. It connects, confirms the MEV RPC,
   deploys and verifies the Executor, authorizes and approves, unwinds a real
@@ -715,7 +762,7 @@ loan always repaid), then an external review before moving significant size.
 |---|---|---|
 | M0 ✅ | Registry + verified addresses; Executor with patches, flash callback, guards | Fork test: flash-unwind of a real PT-USD3 Morpho loop passes |
 | M1 (built) | Compiler + simulation; UI (Positions, Review/Sign, Setup with deploy + verify, **Access/Revoke**); Rabby + Ledger signing; MEV-protected RPC; local `pnpm start` | ⏳ Real unwind of a small position on mainnet from a Ledger (needs you) |
-| M2 | Full Builder UI (palette, drag-drop, amount wiring), templates 7.1–7.4 | Build a new custom flow in < 60s |
+| M2 (built) | Builder UI (palette, drag-drop, amounts, validation), templates 7.1–7.4 + move A→B, save/export/share | ✅ Custom unwind built and simulated in ~9 s (automated E2E) |
 | M3 | Re Protocol blocks, PT-reUSD templates, aggregator swaps, roll/migrate | reUSD loop entry and exit on a fork, then mainnet |
 | M4 | ERC-7730 descriptor, EIP-7702 mode | Optional: sign with no Executor deployment, via 7702 |
 

@@ -32,3 +32,16 @@ export const publicClient: PublicClient = createPublicClient({
 }) as PublicClient;
 
 export const EXPLORER = "https://etherscan.io";
+
+/**
+ * Dev-fork simulation mines a transaction inside evm_snapshot / evm_revert. If a real
+ * transaction landed in between, the revert would silently undo it, so every dev-fork
+ * simulation and every send hold this lock (a no-op cost on mainnet, where simulation is
+ * the stateless eth_simulateV1).
+ */
+let lock: Promise<unknown> = Promise.resolve();
+export function withChainLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = lock.then(fn, fn);
+  lock = run.catch(() => undefined);
+  return run;
+}

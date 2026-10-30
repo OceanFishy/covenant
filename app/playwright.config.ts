@@ -5,6 +5,8 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "e2e",
   timeout: 300_000,
+  // All specs share one fork; dev-fork simulation snapshots/reverts it, so never run in parallel.
+  workers: 1,
   expect: { timeout: 60_000 },
   globalSetup: "./e2e/global-setup.ts",
   use: { baseURL: "http://127.0.0.1:4173", screenshot: "only-on-failure", viewport: { width: 1280, height: 900 } },

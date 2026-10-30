@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createPublicClient, encodeAbiParameters, http, keccak256, numberToHex, pad, parseAbi } from "viem";
-import { OWNER, RPC } from "./fixtures";
+import { OWNER, OWNER_B, RPC } from "./fixtures";
 
 // Self-contained (Playwright's loader can't import the app's JSON modules).
 const MORPHO = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb";
@@ -25,8 +25,10 @@ export default async function globalSetup() {
 
   const client = createPublicClient({ transport: http(RPC, { timeout: 180_000, retryCount: 0 }) });
   const req = client.request as (a: { method: string; params: unknown[] }) => Promise<unknown>;
-  await req({ method: "hardhat_impersonateAccount", params: [OWNER] });
-  await req({ method: "hardhat_setBalance", params: [OWNER, numberToHex(10n ** 20n)] });
+  for (const who of [OWNER, OWNER_B]) {
+    await req({ method: "hardhat_impersonateAccount", params: [who] });
+    await req({ method: "hardhat_setBalance", params: [who, numberToHex(10n ** 20n)] });
+  }
   const [, borrowShares, collateral] = await client.readContract({
     address: MORPHO,
     abi: parseAbi(["function position(bytes32,address) view returns (uint256,uint128,uint128)"]),

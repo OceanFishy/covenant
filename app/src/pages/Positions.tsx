@@ -100,6 +100,11 @@ function Row({ p, ready }: { p: PositionView; ready: boolean }) {
         <button disabled={!ready || p.borrowShares === 0n} onClick={() => go(`#/review?kind=unwind&market=${encodeURIComponent(p.market.key)}`)} data-testid={`unwind-${p.market.key}`}>
           {MODE_LABEL[mode]}
         </button>
+        <div>
+          <a className="small" href="#/builder">
+            or edit it in the Builder
+          </a>
+        </div>
       </td>
     </tr>
   );

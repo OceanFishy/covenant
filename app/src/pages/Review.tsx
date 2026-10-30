@@ -1,33 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { decodeFunctionData, keccak256, type Abi, type Address } from "viem";
-import { AddressLink, Card, Notice, SentLine, useSendTx } from "../components/common";
-import { health, signed, withSymbol } from "../format";
-import { erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../lib/abis";
+import { Card, Notice } from "../components/common";
+import { MAX_SIM_AGE_BLOCKS, PlanSteps, SignPanel } from "../components/PlanPanels";
+import { SimSummary } from "../components/SimSummary";
 import { publicClient } from "../lib/chain";
 import type { Plan } from "../lib/compiler/types";
 import { buildEnter, buildUnwind } from "../lib/planner";
 import { readPosition } from "../lib/positions";
 import { defaultQuoteConfig, HEADROOM_LADDER_BPS } from "../lib/quotes";
-import { MARKETS, label } from "../lib/registry";
+import { MARKETS } from "../lib/registry";
 import { isSwapFailure, simulatePlan, type SimulationResult } from "../lib/simulate";
 import { useApp } from "../state";
 
-const MAX_SIM_AGE_BLOCKS = 3n;
-
 type Prepared = { plan: Plan; sim: Extract<SimulationResult, { ok: true }> };
-
-const KNOWN_ABIS: Abi[] = [executorAbi, morphoAbi, erc20Abi, ytAbi, syAbi];
-
-function fnName(data: `0x${string}`): string {
-  for (const abi of KNOWN_ABIS) {
-    try {
-      return decodeFunctionData({ abi, data }).functionName;
-    } catch {
-      /* try next */
-    }
-  }
-  return data.slice(0, 10);
-}
 
 export function ReviewPage({ params }: { params: URLSearchParams }) {
   const app = useApp();
@@ -40,7 +24,6 @@ export function ReviewPage({ params }: { params: URLSearchParams }) {
   const [status, setStatus] = useState<string>("Preparing…");
   const [failure, setFailure] = useState<string>();
   const [block, setBlock] = useState<bigint>();
-  const tx = useSendTx();
   const [done, setDone] = useState(false);
 
   const prepare = useCallback(async () => {
@@ -118,14 +101,6 @@ export function ReviewPage({ params }: { params: URLSearchParams }) {
   if (!owner || !executor) return <Notice tone="warn">Connect Rabby and finish Setup first.</Notice>;
 
   const stale = prepared && block !== undefined && block - prepared.sim.block > MAX_SIM_AGE_BLOCKS;
-  const blocker = app.signBlockedReason ?? (!app.executorCheck?.ok ? "Executor not verified." : undefined);
-
-  async function sign() {
-    if (!prepared) return;
-    await tx.run({ to: executor!, data: prepared.plan.data });
-    setDone(true);
-  }
-
   return (
     <>
       <Card title={`Review · ${market.label}`} actions={<a href="#/">← Positions</a>}>
@@ -138,116 +113,14 @@ export function ReviewPage({ params }: { params: URLSearchParams }) {
             </button>
           </Notice>
         )}
-        {prepared && <Summary p={prepared} />}
+        {prepared && <SimSummary plan={prepared.plan} sim={prepared.sim} />}
       </Card>
       {prepared && (
         <>
-          <Card title="What this transaction does">
-            <ol className="plan" data-testid="plan-steps">
-              {prepared.plan.steps.map((s, i) => (
-                <li key={i} className={s.depth ? "nested" : ""}>
-                  {s.text}
-                </li>
-              ))}
-            </ol>
-            <details>
-              <summary>Raw calls ({prepared.plan.calls.length} top-level)</summary>
-              <ul className="mono small">
-                {prepared.plan.calls.map((c, i) => (
-                  <li key={i}>
-                    #{i} {label(c.target)}.{fnName(c.data)} {c.patches.length > 0 && `(+${c.patches.length} runtime amount)`}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          </Card>
-          <Card title="Sign">
-            <ul className="small">
-              <li>
-                Rabby will show a transaction to your Executor <AddressLink address={executor} /> calling{" "}
-                <code>execute</code>. Check that the address matches.
-              </li>
-              <li>Rabby's own simulation should show the same balance changes as above. If it doesn't, reject.</li>
-              <li>
-                Your Ledger will ask to <b>blind sign</b> (Ethereum app → Settings → Blind signing). Plan hash{" "}
-                <code className="mono">{prepared.plan.planHash.slice(0, 18)}…</code> · calldata hash{" "}
-                <code className="mono">{keccak256(prepared.plan.data).slice(0, 18)}…</code>
-              </li>
-              <li>Broadcast goes through the MEV-protected RPC you set in Rabby.</li>
-            </ul>
-            {stale && <Notice tone="warn">Simulation is more than {String(MAX_SIM_AGE_BLOCKS)} blocks old; re-simulating…</Notice>}
-            {blocker && <Notice tone="warn">{blocker}</Notice>}
-            {tx.error && <Notice tone="danger">{tx.error}</Notice>}
-            {done ? (
-              <Notice tone="ok">
-                Done. <a href="#/">Back to positions</a>
-              </Notice>
-            ) : (
-              <button className="primary big" disabled={!!blocker || !!stale || tx.busy} onClick={() => void sign()} data-testid="sign">
-                {tx.busy ? "Waiting for Rabby / Ledger…" : "Sign with Ledger"}
-              </button>
-            )}
-            <SentLine tx={tx.last} />
-          </Card>
+          <PlanSteps plan={prepared.plan} />
+          <SignPanel plan={prepared.plan} stale={!!stale} onDone={() => setDone(true)} />
         </>
       )}
     </>
-  );
-}
-
-function Summary({ p }: { p: Prepared }) {
-  const { plan, sim } = p;
-  const m = plan.market;
-  const titles = {
-    unwind: "Full unwind: all debt repaid, all collateral redeemed",
-    deleverage: "Repay all debt; PT without matching YT returns to your wallet",
-    partial: "Partial unwind: only the PT your YT covers",
-    enter: "Enter: open a leveraged PT loop",
-  };
-  return (
-    <>
-      <h3>{titles[plan.kind]}</h3>
-      <table data-testid="balance-changes">
-        <thead>
-          <tr>
-            <th>Your wallet</th>
-            <th>Before</th>
-            <th>After</th>
-            <th>Change</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sim.changes.map((c) => (
-            <tr key={c.token}>
-              <td>{c.symbol}</td>
-              <td>{withSymbol(c.before, c.token)}</td>
-              <td>{withSymbol(c.after, c.token)}</td>
-              <td className={c.after > c.before ? "ok-text" : c.after < c.before ? "danger-text" : ""}>{signed(c.after - c.before, c.token)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="row small">
-        <span>Position after: {withSymbol(sim.collateralAfter, m.series.pt, 0)} collateral, {sim.borrowSharesAfter === 0n ? "no debt" : "debt remains"}</span>
-        <span>· health after {health(sim.healthAfter)}</span>
-        <span>· gas {sim.gasUsed.toLocaleString()}</span>
-        <span>· simulated at block {String(sim.block)} ({sim.method})</span>
-      </p>
-      {plan.swap && (
-        <p className="small">
-          Swap leg: {withSymbol(plan.swap.amountIn, plan.swap.sellToken)} → ≥ {withSymbol(plan.swap.minOut, plan.swap.buyToken)} via{" "}
-          {plan.swap.aggregator === "0x" ? "0x" : "KyberSwap"} (stablecoins only; checked on-chain).
-        </p>
-      )}
-      {plan.kind === "deleverage" && <OwnerAddress address={plan.owner} />}
-    </>
-  );
-}
-
-function OwnerAddress({ address }: { address: Address }) {
-  return (
-    <p className="small muted">
-      Unlevered PT goes to <AddressLink address={address} />. It redeems on its own at maturity, or with matching YT.
-    </p>
   );
 }
