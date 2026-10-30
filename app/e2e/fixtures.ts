@@ -10,9 +10,10 @@ export const RPC = "http://127.0.0.1:8545";
  * A stand-in for Rabby: announces itself over EIP-6963 as io.rabby and forwards every request
  * to the fork node, where OWNER is impersonated (so eth_sendTransaction "signs").
  */
-export async function installMockRabby(page: Page, account: string = OWNER) {
+export async function installMockRabby(page: Page, account: string = OWNER, preApproved = false) {
   await page.addInitScript(
-    ({ owner, rpc }) => {
+    ({ owner, rpc, preApproved }) => {
+      if (preApproved) sessionStorage.setItem("mockRabbyApproved", "1");
       let id = 0;
       const provider = {
         async request({ method, params }: { method: string; params?: unknown[] }) {
@@ -43,6 +44,6 @@ export async function installMockRabby(page: Page, account: string = OWNER) {
       window.addEventListener("eip6963:requestProvider", announce);
       announce();
     },
-    { owner: account, rpc: RPC },
+    { owner: account, rpc: RPC, preApproved },
   );
 }

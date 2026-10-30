@@ -15,6 +15,8 @@ export const devFork = defineChain({
   name: "Mainnet fork (local)",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: [RPC_URL] } },
+  // Same Multicall3 as mainnet (the fork has mainnet state).
+  contracts: { multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" } },
 });
 
 export const chain = DEV_FORK ? devFork : mainnet;
@@ -26,9 +28,14 @@ export const chain = DEV_FORK ? devFork : mainnet;
  */
 export const transportOptions = DEV_FORK ? { timeout: 180_000, retryCount: 0 } : {};
 
+/**
+ * Concurrent contract reads are merged into one Multicall3 eth_call, and other concurrent RPC
+ * calls go out as one JSON-RPC batch: a full positions refresh is ~2 HTTP requests.
+ */
 export const publicClient: PublicClient = createPublicClient({
   chain,
-  transport: http(RPC_URL, transportOptions),
+  batch: { multicall: { wait: 0 } },
+  transport: http(RPC_URL, { ...transportOptions, batch: { wait: 0 } }),
 }) as PublicClient;
 
 export const EXPLORER = "https://etherscan.io";

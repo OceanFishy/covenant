@@ -7,14 +7,7 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import {
-  erc20Abi,
-  executorAbi,
-  executorBytecode,
-  executorDeployedBytecode,
-  executorImmutableReferences,
-  morphoAbi,
-} from "./abis";
+import { erc20Abi, executorAbi, loadExecutorBytecode, morphoAbi, type ExecutorBytecode } from "./abis";
 import { MORPHO, TOKENS, SERIES } from "./registry";
 
 // ---------------------------------------------------------------- local storage (per owner)
@@ -58,9 +51,9 @@ export function rememberExecutor(owner: Address, address: Address) {
 // ---------------------------------------------------------------- verification
 
 /** Runtime bytecode with immutable slots (owner, morpho) zeroed, for comparison. */
-function maskImmutables(code: Hex): string {
+function maskImmutables(code: Hex, refsByName: ExecutorBytecode["immutableReferences"]): string {
   const bytes = code.slice(2).split("");
-  for (const refs of Object.values(executorImmutableReferences)) {
+  for (const refs of Object.values(refsByName)) {
     for (const { start, length } of refs) {
       for (let i = start * 2; i < (start + length) * 2; i++) bytes[i] = "0";
     }
@@ -77,7 +70,9 @@ export type Verification = { ok: true } | { ok: false; reason: string };
 export async function verifyExecutor(client: PublicClient, address: Address, owner: Address): Promise<Verification> {
   const code = await client.getCode({ address });
   if (!code || code === "0x") return { ok: false, reason: "no contract at this address" };
-  if (maskImmutables(code) !== maskImmutables(executorDeployedBytecode)) {
+  const compiled = await loadExecutorBytecode();
+  const refs = compiled.immutableReferences;
+  if (maskImmutables(code, refs) !== maskImmutables(compiled.deployedBytecode, refs)) {
     return { ok: false, reason: "bytecode does not match CovenantExecutorMainnet (wrong contract or different build)" };
   }
   const [o, m] = await Promise.all([
@@ -99,8 +94,9 @@ export type SetupStep = {
   isDone: (client: PublicClient, owner: Address, executor: Address) => Promise<boolean>;
 };
 
-export function deployData(owner: Address): Hex {
-  return encodeDeployData({ abi: executorAbi, bytecode: executorBytecode, args: [owner] });
+export async function deployData(owner: Address): Promise<Hex> {
+  const { bytecode } = await loadExecutorBytecode();
+  return encodeDeployData({ abi: executorAbi, bytecode, args: [owner] });
 }
 
 /** Approvals the plans need: YT for every unwind, USDC as entry equity. */

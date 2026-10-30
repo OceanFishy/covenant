@@ -10,17 +10,24 @@ export type ProviderDetail = {
 /** Covenant only connects to Rabby (with a Ledger attached), docs/SPEC.md §3. */
 export const RABBY_RDNS = "io.rabby";
 
-/** Collects EIP-6963 announcements for `ms` and returns the Rabby provider, if any. */
+/**
+ * Returns the Rabby provider as soon as it announces itself over EIP-6963 (normally
+ * synchronously), or undefined after `ms` if it never does.
+ */
 export function discoverRabby(ms = 400): Promise<ProviderDetail | undefined> {
   return new Promise((resolve) => {
-    const found: ProviderDetail[] = [];
-    const onAnnounce = (e: Event) => found.push((e as CustomEvent<ProviderDetail>).detail);
+    const done = (p?: ProviderDetail) => {
+      window.removeEventListener("eip6963:announceProvider", onAnnounce);
+      clearTimeout(timer);
+      resolve(p);
+    };
+    const onAnnounce = (e: Event) => {
+      const d = (e as CustomEvent<ProviderDetail>).detail;
+      if (d?.info?.rdns === RABBY_RDNS) done(d);
+    };
+    const timer = setTimeout(() => done(undefined), ms);
     window.addEventListener("eip6963:announceProvider", onAnnounce);
     window.dispatchEvent(new Event("eip6963:requestProvider"));
-    setTimeout(() => {
-      window.removeEventListener("eip6963:announceProvider", onAnnounce);
-      resolve(found.find((p) => p.info.rdns === RABBY_RDNS));
-    }, ms);
   });
 }
 

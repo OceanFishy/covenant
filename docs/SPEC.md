@@ -627,6 +627,32 @@ in one click.
   a person.
 - **Background:** Review and Builder re-simulate every new block.
 
+### 9.4 Performance (measured, `app/e2e/perf.spec.ts`)
+
+| Positions page (warm local fork) | Before | After | Budget (test fails above) |
+|---|---|---|---|
+| Time until positions show | 958 ms | ~180–250 ms | 2,000 ms |
+| RPC requests during load | 24 | 5 | 8 |
+| RPC requests per minute, idle | 84 | 12 (0 in a background tab) | 20 |
+| JavaScript on first load | 598 KB | 505 KB | 560 KB |
+
+How:
+- **Batching:** concurrent contract reads are merged into one Multicall3 call,
+  and other concurrent RPC calls go out as JSON-RPC batches.
+- **Positions in two rounds:** all markets are read together in two rounds,
+  sharing one block and one Pendle-index read, instead of 3–4 sequential round
+  trips per market.
+- **Wallet discovery:** Rabby discovery resolves the moment Rabby announces
+  itself, instead of always waiting 400 ms.
+- **Background tabs:** polling pauses while the tab is hidden and catches up the
+  moment it's visible again.
+- **Lazy loading:** Builder, Review, Setup and Access load on first visit. The
+  Executor bytecode (44 KB) loads only to deploy or verify.
+- **Review:** reuses one position snapshot for the draft and final plan.
+
+What remains in the main bundle is viem plus its crypto dependencies and React,
+about 160 KB gzipped.
+
 ---
 
 ## 10. Data and registry

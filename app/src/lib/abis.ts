@@ -1,13 +1,18 @@
 import { parseAbi, type Abi, type Hex } from "viem";
-import executor from "../generated/executor.json";
+import executor from "../generated/executor-abi.json";
 
 export const executorAbi = executor.abi as Abi;
-export const executorBytecode = executor.bytecode as Hex;
-export const executorDeployedBytecode = executor.deployedBytecode as Hex;
-export const executorImmutableReferences = executor.immutableReferences as Record<
-  string,
-  { start: number; length: number }[]
->;
+
+export type ExecutorBytecode = {
+  bytecode: Hex;
+  deployedBytecode: Hex;
+  immutableReferences: Record<string, { start: number; length: number }[]>;
+};
+
+/** Bytecode is only needed to deploy or verify an Executor, so it loads on demand. */
+export async function loadExecutorBytecode(): Promise<ExecutorBytecode> {
+  return (await import("../generated/executor-bytecode.json")).default as ExecutorBytecode;
+}
 
 export const erc20Abi = parseAbi([
   "function balanceOf(address) view returns (uint256)",

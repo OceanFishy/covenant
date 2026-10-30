@@ -64,7 +64,7 @@ function ExecutorStep() {
   const owner = app.conn!.account;
 
   async function deploy() {
-    const { receipt } = await tx.run({ data: deployData(owner) });
+    const { receipt } = await tx.run({ data: await deployData(owner) });
     if (!receipt.contractAddress) throw new Error("no contract address in receipt");
     await app.useExecutor(getAddress(receipt.contractAddress));
   }

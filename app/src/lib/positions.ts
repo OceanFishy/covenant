@@ -83,41 +83,103 @@ export async function previewRedeemPt(client: PublicClient, m: Market, pt: bigin
   return client.readContract({ address: s.sy, abi: syAbi, functionName: "previewRedeem", args: [s.tokenOut, sy] });
 }
 
-export async function readPosition(client: PublicClient, m: Market, owner: Address): Promise<PositionView> {
-  const [pos, price, ytBalance, block, expired] = await Promise.all([
-    client.readContract({ address: MORPHO, abi: morphoAbi, functionName: "position", args: [m.id, owner] }),
-    client.readContract({ address: m.oracle, abi: oracleAbi, functionName: "price" }),
-    client.readContract({ address: m.series.yt, abi: erc20Abi, functionName: "balanceOf", args: [owner] }),
+type RawMarket = readonly [bigint, bigint, bigint, bigint, bigint, bigint];
+
+/** Debt with interest accrued for `elapsed` seconds at `rate` (Morpho's own math). */
+function accruedDebt(raw: RawMarket, rate: bigint, elapsed: bigint, borrowShares: bigint): bigint {
+  const [, , totalBorrowAssets, totalBorrowShares] = raw;
+  const borrowAssets = elapsed > 0n && totalBorrowAssets > 0n ? totalBorrowAssets + (totalBorrowAssets * taylor(rate, elapsed)) / WAD : totalBorrowAssets;
+  return borrowShares === 0n ? 0n : mulDivUp(borrowShares, borrowAssets + VIRTUAL_ASSETS, totalBorrowShares + VIRTUAL_SHARES);
+}
+
+/**
+ * Reads positions for several markets in two batched rounds (concurrent reads are merged into one
+ * Multicall3 call by the client): round 1 = positions, market totals, prices, YT balances, expiry,
+ * Pendle index + the latest block; round 2 = interest rates and redemption previews.
+ */
+export async function readPositionsFor(client: PublicClient, markets: Market[], owner: Address): Promise<PositionView[]> {
+  const seriesList = [...new Set(markets.map((m) => m.series))];
+  const [block, perMarket, perSeries] = await Promise.all([
     client.getBlock(),
-    client.readContract({ address: m.series.yt, abi: ytAbi, functionName: "isExpired" }),
+    Promise.all(
+      markets.map((m) =>
+        Promise.all([
+          client.readContract({ address: MORPHO, abi: morphoAbi, functionName: "position", args: [m.id, owner] }),
+          client.readContract({ address: MORPHO, abi: morphoAbi, functionName: "market", args: [m.id] }),
+          client.readContract({ address: m.oracle, abi: oracleAbi, functionName: "price" }),
+        ]),
+      ),
+    ),
+    Promise.all(
+      seriesList.map((s) =>
+        Promise.all([
+          client.readContract({ address: s.yt, abi: erc20Abi, functionName: "balanceOf", args: [owner] }),
+          client.readContract({ address: s.yt, abi: ytAbi, functionName: "isExpired" }),
+          client.readContract({ address: s.yt, abi: ytAbi, functionName: "pyIndexStored" }),
+        ]),
+      ),
+    ),
   ]);
-  const [, borrowShares, collateral] = pos;
   // Allow ~2 blocks between reading and the transaction landing.
-  const debt = await expectedDebt(client, m, borrowShares, block.timestamp + 24n);
-  const matched = expired ? collateral : collateral < ytBalance ? collateral : ytBalance;
-  const [proceedsMatched, proceedsAll] = await Promise.all([
-    previewRedeemPt(client, m, matched),
-    previewRedeemPt(client, m, collateral),
-  ]);
-  const collateralValue = (collateral * price) / ORACLE_SCALE;
-  return {
-    market: m,
-    collateral,
-    borrowShares,
-    debt,
-    price,
-    healthFactor: healthFactor(collateral, price, m.lltv, debt),
-    ltv: collateralValue === 0n ? 0n : (debt * WAD) / collateralValue,
-    ytBalance,
-    matched,
-    proceedsMatched,
-    proceedsAll,
-    expired,
-  };
+  const now = block.timestamp + 24n;
+
+  const rows = markets.map((m, i) => {
+    const [[, borrowShares, collateral], raw, price] = perMarket[i];
+    const [ytBalance, expired, pyIndex] = perSeries[seriesList.indexOf(m.series)];
+    const matched = expired ? collateral : collateral < ytBalance ? collateral : ytBalance;
+    return { m, borrowShares, collateral, raw, price, ytBalance, expired, pyIndex, matched };
+  });
+
+  const previews = (r: (typeof rows)[number], pt: bigint) =>
+    pt === 0n
+      ? Promise.resolve(0n)
+      : client.readContract({ address: r.m.series.sy, abi: syAbi, functionName: "previewRedeem", args: [r.m.series.tokenOut, (pt * WAD) / r.pyIndex] });
+  const round2 = await Promise.all(
+    rows.map((r) => {
+      const [totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares, lastUpdate, fee] = r.raw;
+      const needsRate = r.borrowShares > 0n && totalBorrowAssets > 0n && now > lastUpdate;
+      return Promise.all([
+        needsRate
+          ? client.readContract({
+              address: r.m.irm,
+              abi: irmAbi,
+              functionName: "borrowRateView",
+              args: [params(r.m), { totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares, lastUpdate, fee }],
+            })
+          : Promise.resolve(0n),
+        previews(r, r.matched),
+        r.matched === r.collateral ? Promise.resolve(undefined) : previews(r, r.collateral),
+      ]);
+    }),
+  );
+
+  return rows.map((r, i): PositionView => {
+    const [rate, proceedsMatched, proceedsAllMaybe] = round2[i];
+    const debt = accruedDebt(r.raw, rate, now - r.raw[4], r.borrowShares);
+    const collateralValue = (r.collateral * r.price) / ORACLE_SCALE;
+    return {
+      market: r.m,
+      collateral: r.collateral,
+      borrowShares: r.borrowShares,
+      debt,
+      price: r.price,
+      healthFactor: healthFactor(r.collateral, r.price, r.m.lltv, debt),
+      ltv: collateralValue === 0n ? 0n : (debt * WAD) / collateralValue,
+      ytBalance: r.ytBalance,
+      matched: r.matched,
+      proceedsMatched,
+      proceedsAll: proceedsAllMaybe ?? proceedsMatched,
+      expired: r.expired,
+    };
+  });
+}
+
+export async function readPosition(client: PublicClient, m: Market, owner: Address): Promise<PositionView> {
+  return (await readPositionsFor(client, [m], owner))[0];
 }
 
 export async function readPositions(client: PublicClient, owner: Address): Promise<PositionView[]> {
-  return Promise.all(MARKETS.map((m) => readPosition(client, m, owner)));
+  return readPositionsFor(client, MARKETS, owner);
 }
 
 /** 3Jane liquidity: how much USD3 SY-USD3 can redeem / deposit right now. */

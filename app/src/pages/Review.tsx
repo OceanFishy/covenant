@@ -5,7 +5,7 @@ import { SimSummary } from "../components/SimSummary";
 import { publicClient } from "../lib/chain";
 import type { Plan } from "../lib/compiler/types";
 import { buildEnter, buildUnwind } from "../lib/planner";
-import { readPosition } from "../lib/positions";
+import { readPosition, type PositionView } from "../lib/positions";
 import { defaultQuoteConfig, HEADROOM_LADDER_BPS } from "../lib/quotes";
 import { MARKETS } from "../lib/registry";
 import { isSwapFailure, simulatePlan, type SimulationResult } from "../lib/simulate";
@@ -33,6 +33,7 @@ export function ReviewPage({ params }: { params: URLSearchParams }) {
     for (const headroomBps of HEADROOM_LADDER_BPS) {
       setStatus(`Building plan and simulating${headroomBps > HEADROOM_LADDER_BPS[0] ? ` (re-quote, ${headroomBps / 100}% headroom)` : ""}…`);
       let draft: Plan;
+      let pos: PositionView | undefined;
       if (kind === "enter") {
         draft = await buildEnter(market, {
           ...base,
@@ -43,7 +44,7 @@ export function ReviewPage({ params }: { params: URLSearchParams }) {
           minHealth: 102n * 10n ** 16n,
         });
       } else {
-        const pos = await readPosition(publicClient, market, owner);
+        pos = await readPosition(publicClient, market, owner);
         draft = await buildUnwind(publicClient, pos, { ...base, headroomBps, minReceive: 0n });
       }
       const sim = await simulatePlan(publicClient, draft);
@@ -55,11 +56,11 @@ export function ReviewPage({ params }: { params: URLSearchParams }) {
       }
       let plan = draft;
       let final: SimulationResult = sim;
-      if (kind === "unwind" && draft.kind !== "partial") {
+      if (pos && draft.kind !== "partial") {
         // Tighten: you must receive at least 99.5% of what the simulation returned.
         const got = sim.changes.find((c) => c.token === market.series.tokenOut)!;
         const minReceive = ((got.after - got.before) * 995n) / 1000n;
-        const pos = await readPosition(publicClient, market, owner);
+        // Same position snapshot and route as the draft; only the guard changes.
         plan = await buildUnwind(publicClient, pos, { ...base, headroomBps, minReceive, reuseSwap: draft.swap });
         final = await simulatePlan(publicClient, plan);
       }

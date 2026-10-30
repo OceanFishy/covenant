@@ -37,7 +37,7 @@ async function sendAs(from: Address, tx: { to?: Address; data: `0x${string}` }) 
 
 async function setup(owner: Address): Promise<Address> {
   await impersonate(client, owner);
-  const executor = getAddress((await sendAs(owner, { data: deployData(owner) })).contractAddress!);
+  const executor = getAddress((await sendAs(owner, { data: await deployData(owner) })).contractAddress!);
   for (const s of setupSteps(executor)) if (!(await s.isDone(client, owner, executor))) await sendAs(owner, s.tx);
   return executor;
 }

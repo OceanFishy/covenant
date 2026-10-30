@@ -17,7 +17,7 @@ import {
 } from "viem";
 import { mainnet } from "viem/chains";
 import { parseEventLogs } from "viem";
-import { erc20Abi, executorAbi, executorDeployedBytecode, executorImmutableReferences } from "../../src/lib/abis";
+import { erc20Abi, executorAbi, loadExecutorBytecode } from "../../src/lib/abis";
 import { deployData } from "../../src/lib/executor";
 import { buildUnwind } from "../../src/lib/planner";
 import { readPosition } from "../../src/lib/positions";
@@ -34,9 +34,10 @@ const mapSlot = (key: Address, slot: bigint | Hex) =>
   keccak256(encodeAbiParameters([{ type: "address" }, { type: typeof slot === "bigint" ? "uint256" : "bytes32" }], [key, slot as never]));
 
 /** Runtime code with the immutables (owner, morpho) filled in, as the constructor would. */
-function runtimeCode(owner: Address): Hex {
-  const refs = Object.values(executorImmutableReferences);
-  let hex = executorDeployedBytecode.slice(2);
+async function runtimeCode(owner: Address): Promise<Hex> {
+  const { deployedBytecode, immutableReferences } = await loadExecutorBytecode();
+  const refs = Object.values(immutableReferences);
+  let hex = deployedBytecode.slice(2);
   // Immutables are assigned in declaration order: owner, then morpho.
   [owner, MORPHO].forEach((value, i) => {
     for (const { start, length } of refs[i]) {
@@ -53,7 +54,7 @@ function runtimeCode(owner: Address): Hex {
 async function constructorStorage(owner: Address): Promise<Record<Hex, Hex>> {
   const res = (await client.request({
     method: "eth_simulateV1" as never,
-    params: [{ blockStateCalls: [{ calls: [{ from: owner, data: deployData(owner) }] }] }, "latest"] as never,
+    params: [{ blockStateCalls: [{ calls: [{ from: owner, data: await deployData(owner) }] }] }, "latest"] as never,
   })) as { calls: { status: Hex; logs: { address: Address; topics: [Hex, ...Hex[]]; data: Hex }[] }[] }[];
   const logs = parseEventLogs({ abi: executorAbi, logs: res[0].calls[0].logs as never });
   const diff: Record<Hex, Hex> = {};
@@ -80,7 +81,7 @@ describe("eth_simulateV1 on mainnet", () => {
     if (pos.borrowShares === 0n) return; // reference position gone
     const yt = MARKET_A.series.yt;
     const overrides: StateOverrides = {
-      [EXECUTOR]: { code: runtimeCode(OWNER), stateDiff: await constructorStorage(OWNER) },
+      [EXECUTOR]: { code: await runtimeCode(OWNER), stateDiff: await constructorStorage(OWNER) },
       // Morpho Blue: isAuthorized is mapping(address => mapping(address => bool)) at slot 6.
       [MORPHO]: { stateDiff: { [mapSlot(EXECUTOR, mapSlot(OWNER, 6n))]: word(1n) } },
       // Pendle YT: balances at slot 0, allowances at slot 1.

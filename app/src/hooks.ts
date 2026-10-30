@@ -26,8 +26,14 @@ export function usePoll<T>(fn: (() => Promise<T>) | undefined, deps: unknown[], 
     setData(undefined);
     if (!fn) return;
     void refresh();
-    const t = setInterval(() => void refresh(), ms);
-    return () => clearInterval(t);
+    // Poll only while the tab is visible; catch up immediately when it becomes visible again.
+    const t = setInterval(() => document.visibilityState === "visible" && void refresh(), ms);
+    const onVisible = () => document.visibilityState === "visible" && void refresh();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 

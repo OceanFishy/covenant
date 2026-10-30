@@ -44,7 +44,7 @@ async function sendAs(from: Address, tx: { to?: Address; data: `0x${string}` }) 
 /** What the app does on first use: deploy, verify, authorize Morpho, approve YT. */
 async function setup(owner: Address): Promise<Address> {
   await impersonate(client, owner);
-  const receipt = await sendAs(owner, { data: deployData(owner) });
+  const receipt = await sendAs(owner, { data: await deployData(owner) });
   const executor = getAddress(receipt.contractAddress!);
   expect(await verifyExecutor(client, executor, owner)).toEqual({ ok: true });
   for (const step of setupSteps(executor)) {

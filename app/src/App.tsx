@@ -1,11 +1,13 @@
-import { Component, type ReactNode } from "react";
+import { Component, lazy, Suspense, type ReactNode } from "react";
 import { Header } from "./components/Header";
 import { useRoute } from "./hooks";
-import { AccessPage } from "./pages/Access";
-import { BuilderPage } from "./pages/Builder";
 import { PositionsPage } from "./pages/Positions";
-import { ReviewPage } from "./pages/Review";
-import { SetupPage } from "./pages/Setup";
+
+// Positions is the landing page; everything else loads on first visit.
+const AccessPage = lazy(() => import("./pages/Access").then((m) => ({ default: m.AccessPage })));
+const BuilderPage = lazy(() => import("./pages/Builder").then((m) => ({ default: m.BuilderPage })));
+const ReviewPage = lazy(() => import("./pages/Review").then((m) => ({ default: m.ReviewPage })));
+const SetupPage = lazy(() => import("./pages/Setup").then((m) => ({ default: m.SetupPage })));
 import { AppProvider } from "./state";
 
 /** Any render error still leaves a way to revoke (docs/SPEC.md §9.3). */
@@ -54,7 +56,9 @@ export function App() {
       <Header />
       <main className="page">
         <ErrorBoundary>
-          <Routes />
+          <Suspense fallback={<p className="muted">Loading…</p>}>
+            <Routes />
+          </Suspense>
         </ErrorBoundary>
       </main>
     </AppProvider>
