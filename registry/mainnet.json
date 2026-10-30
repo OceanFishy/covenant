@@ -1,7 +1,7 @@
 {
   "chainId": 1,
   "verified": "2026-10-30",
-  "verification": "Each Pendle entry checked on-chain: YT.PT() == pt, YT.SY() == sy, YT.expiry(), SY.getTokensIn()/getTokensOut(), SY.yieldToken(). Morpho markets checked with Morpho.idToMarketParams(id). Keep in sync with contracts/config/MainnetConfig.sol.",
+  "verification": "Each Pendle entry checked on-chain: YT.PT() == pt, YT.SY() == sy, YT.expiry(), PT/SY decimals(), SY.getTokensIn()/getTokensOut(), SY.yieldToken(). Morpho markets checked with Morpho.idToMarketParams(id). Aave: PoolAddressesProvider.getPool() == pool, Pool.getReserveAToken/getReserveVariableDebtToken(asset), and each token's UNDERLYING_ASSET_ADDRESS(). Keep in sync with contracts/config/MainnetConfig.sol.",
   "tokens": {
     "USDC": {
       "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -19,7 +19,7 @@
     "reUSD": {
       "address": "0x5086bf358635B81D8C47C66d1C8b9E567Db70c72",
       "decimals": 18,
-      "notes": "Re Protocol. Not ERC-4626. Mint/redeem path still to be verified (M3)."
+      "notes": "Re Protocol senior tranche. Not ERC-4626; price (NAV) set daily by Re's NAVConsumer, ~1.1103 USDC on 2026-10-29. Minting and redeeming with Re is KYC-gated (and instant redemptions pay sUSDe), so the Executor can't use them: loops buy and sell reUSD against USDC through the aggregators (KyberSwap 2026-10-29: 1M reUSD -> 1.106M USDC, 5M -> 5.527M USDC)."
     }
   },
   "morpho": {
@@ -47,7 +47,8 @@
         "collateralToken": "0xeCfaFdC7741323a945A163ed068B5a3C43483957",
         "oracle": "0x217d6DdCDB95112C51657F6270e8C079CFDB51f0",
         "irm": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
-        "lltv": "915000000000000000"
+        "lltv": "915000000000000000",
+        "notes": "SY-reUSD only redeems to reUSD: exits sell just enough reUSD for the USDC debt via an aggregator inside the flash loan (the rest comes back as reUSD); entries swap the flash-loaned USDC to reUSD."
       },
       "PT-USD3-17DEC2026/USDT": {
         "id": "0x37a584c981f6f59f7532ae5565732ee54647773d425978eb94d4cd29c21ff53b",
@@ -60,12 +61,33 @@
       }
     }
   },
+  "aave": {
+    "notes": "Aave v3 Core market (Pool revision 11). Since 2026 every reserve is frozen with LTV 0 by Aave governance: repay and withdraw work, supply and borrow revert (ReserveFrozen) until it is unfrozen. Borrowing for the owner needs credit delegation (approveDelegation on the variable debt token); withdrawing needs the owner's aToken approval to the Executor.",
+    "addressesProvider": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
+    "pool": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+    "reserves": {
+      "USDC": {
+        "aToken": "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c",
+        "aTokenSymbol": "aEthUSDC",
+        "variableDebtToken": "0x72E95b8931767C79bA4EeE721354d6E99a61D004",
+        "variableDebtTokenSymbol": "variableDebtEthUSDC"
+      },
+      "USDT": {
+        "aToken": "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a",
+        "aTokenSymbol": "aEthUSDT",
+        "variableDebtToken": "0x6df1C1E379bC5a00a7b4C6e67A203333772f45A8",
+        "variableDebtTokenSymbol": "variableDebtEthUSDT"
+      }
+    }
+  },
   "pendle": {
     "PT-USD3-17DEC2026": {
       "pt": "0x7f47c3e6b2c00fC4eB4d5Ae50d0Ab0Ab6888Eb4D",
       "yt": "0x5cFfCc9DdEF0fDcf395e2eA24CA5ED5A12032706",
       "sy": "0xeA3BC608F32847B97965C5e1648BDFCd4C2C40d0",
       "expiry": "2026-12-17T00:00:00Z",
+      "ptDecimals": 6,
+      "syDecimals": 6,
       "syTokensIn": [
         "USDC",
         "USD3"
@@ -80,6 +102,9 @@
       "yt": "0xA8bD3B21291AcE53927b35563fc80615919E63D7",
       "sy": "0x9487Bd5A3b16Ecb5F3184453E3ee75B800141648",
       "expiry": "2026-12-10T00:00:00Z",
+      "ptDecimals": 6,
+      "syDecimals": 18,
+      "notes": "PT/YT use the SY asset's decimals (USDC, 6); SY wraps reUSD 1:1 (18). SY.exchangeRate() is reUSD's NAV in USDC.",
       "syTokensIn": [
         "reUSD"
       ],
@@ -88,6 +113,10 @@
       ]
     }
   },
+  "re": {
+    "notes": "Read-only (not on the Executor allowlist): the app reads Re's official instant-redemption fee and status to compare with DEX sales of reUSD. Verified source on Etherscan: redeemInstant checks KYC on msg.sender, pays the active payout token (sUSDe on 2026-10-30) at Re's price router NAV, fee feeBps, max maxRedemption USD per call.",
+    "redemptionGateway": "0x8aEb9453EF22Cb38abC7a3Af9c208F65C1BfE31e"
+  },
   "neverAllowlisted": {
     "notes": "Pendle router and market (AMM) contracts are deliberately excluded from the Executor allowlist.",
     "pendleRouterV4": "0x888888888889758F76e7103c6CbF23ABbF58F946",
@@ -95,7 +124,7 @@
     "pendleMarketPtReUsd": "0x13285bcbc27f92b47b4edb99d744c07b48c977c0"
   },
   "aggregators": {
-    "notes": "Used only for USDC<->USDT. Only USDC/USDT may be approved to them (Executor recipient allowlist). Output enforced by assertMinBalance.",
+    "notes": "Used only for USDC<->USDT and USDC<->reUSD. Only USDC, USDT and reUSD may be approved to them (Executor recipient allowlist), never Pendle assets. Output enforced by assertMinBalance.",
     "0x": {
       "allowanceHolder": "0x0000000000001fF3684f28c67538d4D072C22734",
       "selector": "exec(address,address,uint256,address,bytes) 0x2213bc0b",

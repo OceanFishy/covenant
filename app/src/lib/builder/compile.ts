@@ -1,13 +1,30 @@
-import { encodeFunctionData, getAddress, parseUnits, type Address, type PublicClient } from "viem";
-import { erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../abis";
-import { arg, balancePatch, call, encodeExecute, encodeFlashData, hashCalls, morphoPatch } from "../compiler/encode";
+import { encodeFunctionData, getAddress, maxUint256, parseUnits, type Address, type PublicClient } from "viem";
+import { aavePoolAbi, erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../abis";
+import { arg, balancePatch, call, encodeExecute, encodeFlashData, hashCalls, heldPatch, is7702, minHeldCall, morphoPatch, pullCall } from "../compiler/encode";
 import { fmt } from "../compiler/plans";
 import { Source, type Call, type Patch, type Plan, type Step, type Swap } from "../compiler/types";
 import { expectedDebt } from "../positions";
 import { quoteExactIn, quoteForMinOut, type QuoteConfig } from "../quotes";
-import { MARKETS, MORPHO, SERIES, SWEEP_TOKENS, label, tokenInfo, type Market, type PendleSeries } from "../registry";
+import {
+  AAVE_POOL,
+  AAVE_RESERVES,
+  MARKETS,
+  MORPHO,
+  SERIES,
+  SWEEP_TOKENS,
+  TRACKED_TOKENS,
+  label,
+  reserveOf,
+  tokenInfo,
+  type AaveReserve,
+  type Market,
+  type PendleSeries,
+} from "../registry";
 import { SWAP_TOKENS } from "./catalog";
-import type { Amount, Block, Debt, Fixed, Issue } from "./types";
+import type { AaveDebt, Amount, Block, Debt, Fixed, Issue } from "./types";
+
+/** Aave v3 variable rate (stable rate is gone from v3). */
+const VARIABLE = 2n;
 
 const WAD = 10n ** 18n;
 
@@ -35,6 +52,11 @@ function params(m: Market) {
   return { loanToken: m.loanToken, collateralToken: m.collateralToken, oracle: m.oracle, irm: m.irm, lltv: m.lltv };
 }
 
+/** A health factor typed by the user ("1.05") as WAD. */
+function healthWad(min: string): bigint {
+  return (BigInt(Math.round(Number(min) * 10_000)) * WAD) / 10_000n;
+}
+
 function* walk(blocks: Block[]): Generator<Block> {
   for (const b of blocks) {
     yield b;
@@ -59,6 +81,9 @@ export function validate(blocks: Block[]): Issue[] {
       err(b, `"${f.value}" is not a valid amount`);
     }
   };
+  const checkReserve = (b: Block, asset: Address) => {
+    if (!AAVE_RESERVES.some((r) => eq(r.asset, asset))) err(b, "only USDC and USDT are supported on Aave");
+  };
 
   const ytIn = new Set<string>(); // series whose YT reaches the executor before redeemPY
   const visit = (list: Block[], inFlash: boolean) => {
@@ -68,6 +93,7 @@ export function validate(blocks: Block[]): Issue[] {
           if (inFlash) err(b, "flash loans can't be nested");
           if (!b.children.length) err(b, "drop the blocks that use the loan inside the flash loan");
           if (b.amount.kind === "fixed") checkFixed(b, b.amount, b.token);
+          if (b.amount.kind === "aaveDebt") checkReserve(b, b.amount.asset);
           visit(b.children, true);
           break;
         case "pull":
@@ -103,15 +129,32 @@ export function validate(blocks: Block[]): Issue[] {
           break;
         case "swap":
           if (!SWAP_TOKENS.some((t) => eq(t, b.sell)) || !SWAP_TOKENS.some((t) => eq(t, b.buy))) {
-            err(b, "only USDC ↔ USDT can be swapped (Pendle assets are never traded)");
+            err(b, "only USDC, USDT and reUSD can be swapped (Pendle assets are never traded)");
           }
           if (eq(b.sell, b.buy)) err(b, "sell and buy tokens are the same");
           if (b.amount.kind === "fixed") checkFixed(b, b.amount, b.mode === "exactIn" ? b.sell : b.buy);
+          if (b.amount.kind === "aaveDebt") checkReserve(b, b.amount.asset);
           break;
         case "guardMinBalance":
           checkFixed(b, b.min, b.token, false);
           break;
         case "guardMinHealth":
+          if (!(Number(b.min) > 0)) err(b, "enter a health factor like 1.05");
+          break;
+        case "aaveSupply":
+        case "aaveWithdraw":
+        case "aaveRepay":
+          checkReserve(b, b.asset);
+          if (b.amount.kind === "fixed") checkFixed(b, b.amount, b.asset);
+          break;
+        case "aaveBorrow":
+          checkReserve(b, b.asset);
+          checkFixed(b, b.amount, b.asset);
+          break;
+        case "guardAaveNoDebt":
+          checkReserve(b, b.asset);
+          break;
+        case "guardAaveHealth":
           if (!(Number(b.min) > 0)) err(b, "enter a health factor like 1.05");
           break;
         default:
@@ -150,7 +193,7 @@ function approve(token: Address, spender: Address, amount: bigint, patch?: Patch
 }
 
 function minBalance(x: CompileContext, token: Address, min: bigint): Call {
-  return call(x.executor, encodeFunctionData({ abi: executorAbi, functionName: "assertMinBalance", args: [token, x.executor, min] }));
+  return minHeldCall(x, token, min);
 }
 
 function amountText(a: Amount, token: Address): string {
@@ -165,17 +208,35 @@ function amountText(a: Amount, token: Address): string {
       return `all ${label(token)} collateral`;
     case "allShares":
       return "all debt (by shares, no dust)";
+    case "aaveDebt":
+      return `the whole Aave ${label(a.asset)} debt${a.bps !== 10_000 ? ` + ${((a.bps - 10_000) / 100).toFixed(2)}%` : ""}`;
+    case "allDebt":
+      return `all Aave ${label(token)} debt (exact, read at execution)`;
+    case "supplied":
+      return `all your ${label(token)} on Aave`;
   }
 }
 
-async function debtNow(x: CompileContext, d: Debt): Promise<bigint> {
+/** Live amount for a Debt / AaveDebt (+bps), to size an aggregator quote. */
+async function debtNow(x: CompileContext, d: Debt | AaveDebt): Promise<bigint> {
+  if (d.kind === "aaveDebt") {
+    const debt = await x.client.readContract({ address: reserveOf(d.asset).debtToken.address, abi: erc20Abi, functionName: "balanceOf", args: [x.owner] });
+    return (debt * BigInt(d.bps)) / 10_000n;
+  }
   const m = marketByKey(d.market);
   const [, shares] = await x.client.readContract({ address: MORPHO, abi: morphoAbi, functionName: "position", args: [m.id, x.owner] });
   const block = await x.client.getBlock();
   return ((await expectedDebt(x.client, m, shares, block.timestamp + 24n)) * BigInt(d.bps)) / 10_000n;
 }
 
-async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record<string, Swap>, used: Set<string>) {
+async function compileBlock(
+  b: Block,
+  x: CompileContext,
+  out: Out,
+  swaps: Record<string, Swap>,
+  used: Set<string>,
+  aave: Set<AaveReserve>,
+) {
   const me = x.executor;
   switch (b.type) {
     case "accrueInterest": {
@@ -186,15 +247,12 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
     }
     case "pull": {
       const v = toUnits(b.amount, b.token);
-      out.add(
-        call(b.token, encodeFunctionData({ abi: erc20Abi, functionName: "transferFrom", args: [x.owner, me, v] })),
-        `Pull ${fmt(v, b.token)} from your wallet`,
-      );
+      out.add(pullCall(x, b.token, v), is7702(x) ? `Use ${fmt(v, b.token)} from your wallet (allot)` : `Pull ${fmt(v, b.token)} from your wallet`);
       return;
     }
     case "flashLoan": {
       const inner = new Out(1);
-      for (const c of b.children) await compileBlock(c, x, inner, swaps, used);
+      for (const c of b.children) await compileBlock(c, x, inner, swaps, used, aave);
       inner.steps.push({ text: "Morpho takes the flash loan back", depth: 1 });
       const data = (assets: bigint) =>
         encodeFunctionData({ abi: morphoAbi, functionName: "flashLoan", args: [b.token, assets, encodeFlashData(b.token, inner.calls)] });
@@ -204,6 +262,13 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
         out.add(
           call(MORPHO, data(0n), morphoPatch(arg(1), Source.MORPHO_DEBT_ASSETS, m.id, x.owner, b.amount.bps)),
           `Flash-borrow ${amountText(b.amount, b.token)} on ${m.label} in ${label(b.token)} from Morpho (fee-free)`,
+        );
+      } else if (b.amount.kind === "aaveDebt") {
+        const r = reserveOf(b.amount.asset);
+        aave.add(r);
+        out.add(
+          call(MORPHO, data(0n), balancePatch(arg(1), r.debtToken.address, x.owner, b.amount.bps)),
+          `Flash-borrow ${amountText(b.amount, b.token)} in ${label(b.token)} from Morpho (fee-free)`,
         );
       } else {
         const v = toUnits(b.amount, b.token);
@@ -217,7 +282,7 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
       used.add(m.key);
       const t = m.loanToken;
       if (b.amount.kind === "allShares") {
-        out.add(approve(t, MORPHO, 0n, balancePatch(arg(1), t, me)), `Approve ${label(t)} to Morpho for the repayment`);
+        out.add(approve(t, MORPHO, 0n, heldPatch(x, arg(1), t)), `Approve ${label(t)} to Morpho for the repayment`);
         out.add(
           call(
             MORPHO,
@@ -227,9 +292,9 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
           `Repay all debt on ${m.label} (by shares, no dust)`,
         );
       } else if (b.amount.kind === "balance") {
-        out.add(approve(t, MORPHO, 0n, balancePatch(arg(1), t, me)), `Approve ${label(t)} to Morpho`);
+        out.add(approve(t, MORPHO, 0n, heldPatch(x, arg(1), t)), `Approve ${label(t)} to Morpho`);
         out.add(
-          call(MORPHO, encodeFunctionData({ abi: morphoAbi, functionName: "repay", args: [params(m), 0n, 0n, x.owner, "0x"] }), balancePatch(arg(5), t, me)),
+          call(MORPHO, encodeFunctionData({ abi: morphoAbi, functionName: "repay", args: [params(m), 0n, 0n, x.owner, "0x"] }), heldPatch(x, arg(5), t)),
           `Repay ${amountText(b.amount, t)} on ${m.label}`,
         );
       } else {
@@ -257,8 +322,8 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
       const t = m.collateralToken;
       const data = (v: bigint) => encodeFunctionData({ abi: morphoAbi, functionName: "supplyCollateral", args: [params(m), v, x.owner, "0x"] });
       if (b.amount.kind === "balance") {
-        out.add(approve(t, MORPHO, 0n, balancePatch(arg(1), t, me)), `Approve all ${label(t)} to Morpho`);
-        out.add(call(MORPHO, data(0n), balancePatch(arg(5), t, me)), `Supply all ${label(t)} as collateral on ${m.label}`);
+        out.add(approve(t, MORPHO, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Morpho`);
+        out.add(call(MORPHO, data(0n), heldPatch(x, arg(5), t)), `Supply all ${label(t)} as collateral on ${m.label}`);
       } else {
         const v = toUnits(b.amount, t);
         out.add(approve(t, MORPHO, v), `Approve ${fmt(v, t)} to Morpho`);
@@ -276,8 +341,8 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
     case "redeemPY": {
       const s = seriesByKey(b.series);
       if (b.amount.kind === "balance") {
-        out.add(call(s.pt, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), balancePatch(arg(1), s.pt, me)), "Send all PT to the Pendle YT contract");
-        out.add(call(s.yt, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), balancePatch(arg(1), s.yt, me)), "Send the matching YT to the Pendle YT contract");
+        out.add(call(s.pt, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), heldPatch(x, arg(1), s.pt)), "Send all PT to the Pendle YT contract");
+        out.add(call(s.yt, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), heldPatch(x, arg(1), s.yt)), "Send the matching YT to the Pendle YT contract");
       } else {
         const v = toUnits(b.amount, s.pt);
         out.add(call(s.pt, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, v] })), `Send ${fmt(v, s.pt)} to the Pendle YT contract`);
@@ -290,7 +355,7 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
       const s = seriesByKey(b.series);
       const min = toUnits(b.minOut, b.tokenOut);
       out.add(
-        call(s.sy, encodeFunctionData({ abi: syAbi, functionName: "redeem", args: [me, 0n, b.tokenOut, min, false] }), balancePatch(arg(1), s.sy, me)),
+        call(s.sy, encodeFunctionData({ abi: syAbi, functionName: "redeem", args: [me, 0n, b.tokenOut, min, false] }), heldPatch(x, arg(1), s.sy)),
         `Redeem all SY → ${label(b.tokenOut)}${min > 0n ? ` (min ${fmt(min, b.tokenOut)})` : ""}`,
       );
       return;
@@ -299,9 +364,9 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
       const s = seriesByKey(b.series);
       const t = b.tokenIn;
       if (b.amount.kind === "balance") {
-        out.add(approve(t, s.sy, 0n, balancePatch(arg(1), t, me)), `Approve all ${label(t)} to SY`);
+        out.add(approve(t, s.sy, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to SY`);
         out.add(
-          call(s.sy, encodeFunctionData({ abi: syAbi, functionName: "deposit", args: [me, t, 0n, 0n] }), balancePatch(arg(2), t, me)),
+          call(s.sy, encodeFunctionData({ abi: syAbi, functionName: "deposit", args: [me, t, 0n, 0n] }), heldPatch(x, arg(2), t)),
           `Deposit all ${label(t)} into SY`,
         );
       } else {
@@ -309,7 +374,7 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
         out.add(approve(t, s.sy, v), `Approve ${fmt(v, t)} to SY`);
         out.add(call(s.sy, encodeFunctionData({ abi: syAbi, functionName: "deposit", args: [me, t, v, 0n] })), `Deposit ${fmt(v, t)} into SY`);
       }
-      out.add(call(s.sy, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), balancePatch(arg(1), s.sy, me)), "Send all SY to the Pendle YT contract");
+      out.add(call(s.sy, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), heldPatch(x, arg(1), s.sy)), "Send all SY to the Pendle YT contract");
       const ytTo = b.ytTo === "wallet" ? x.owner : me;
       out.add(
         call(s.yt, encodeFunctionData({ abi: ytAbi, functionName: "mintPY", args: [me, ytTo] })),
@@ -320,7 +385,7 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
     case "swap": {
       let swap = x.reuseSwaps?.[b.id];
       if (!swap) {
-        const target = b.amount.kind === "debt" ? await debtNow(x, b.amount) : toUnits(b.amount, b.mode === "exactIn" ? b.sell : b.buy);
+        const target = b.amount.kind === "fixed" ? toUnits(b.amount, b.mode === "exactIn" ? b.sell : b.buy) : await debtNow(x, b.amount);
         swap =
           b.mode === "exactIn"
             ? await quoteExactIn(x.quotes, b.sell, b.buy, target, me)
@@ -346,10 +411,93 @@ async function compileBlock(b: Block, x: CompileContext, out: Out, swaps: Record
     case "guardMinHealth": {
       const m = marketByKey(b.market);
       used.add(m.key);
-      const min = (BigInt(Math.round(Number(b.min) * 10_000)) * WAD) / 10_000n;
+      const min = healthWad(b.min);
       out.add(
         call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertMinHealth", args: [m.id, x.owner, min] })),
         `Check: ${m.label} health factor ≥ ${b.min}`,
+      );
+      return;
+    }
+    case "aaveSupply": {
+      const r = reserveOf(b.asset);
+      aave.add(r);
+      const t = r.asset;
+      const data = (v: bigint) => encodeFunctionData({ abi: aavePoolAbi, functionName: "supply", args: [t, v, x.owner, 0] });
+      if (b.amount.kind === "balance") {
+        out.add(approve(t, AAVE_POOL, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Aave`);
+        out.add(call(AAVE_POOL, data(0n), heldPatch(x, arg(1), t)), `Supply all ${label(t)} to Aave for you`);
+      } else {
+        const v = toUnits(b.amount, t);
+        out.add(approve(t, AAVE_POOL, v), `Approve ${fmt(v, t)} to Aave`);
+        out.add(call(AAVE_POOL, data(v)), `Supply ${fmt(v, t)} to Aave for you`);
+      }
+      return;
+    }
+    case "aaveWithdraw": {
+      const r = reserveOf(b.asset);
+      aave.add(r);
+      const a = r.aToken.address;
+      // Executor: pull the aTokens, then withdraw all it holds. 7702: they are already in your
+      // wallet, so allot them and withdraw only that much (withdraw-max would take your whole
+      // supply). Aave may burn 1 wei more than the amount (rounding), hence the +2 wei allotment.
+      const self = is7702(x);
+      let amount = maxUint256;
+      if (b.amount.kind === "supplied") {
+        out.add(pullCall(x, a, 0n, (o) => balancePatch(o, a, x.owner)), `${self ? "Use" : "Pull"} all your ${r.aToken.symbol}${self ? " (allot)" : " into the Executor"}`);
+      } else {
+        const v = toUnits(b.amount, r.asset);
+        if (self) amount = v;
+        out.add(pullCall(x, a, self ? v + 2n : v), self ? `Use ${fmt(v, a)} of your Aave supply (allot)` : `Pull ${fmt(v, a)} into the Executor`);
+      }
+      out.add(
+        call(AAVE_POOL, encodeFunctionData({ abi: aavePoolAbi, functionName: "withdraw", args: [r.asset, amount, me] })),
+        `Withdraw ${amount === maxUint256 ? "it" : fmt(amount, r.asset)} from Aave as ${label(r.asset)}`,
+      );
+      return;
+    }
+    case "aaveBorrow": {
+      const r = reserveOf(b.asset);
+      aave.add(r);
+      const v = toUnits(b.amount, r.asset);
+      out.add(
+        call(AAVE_POOL, encodeFunctionData({ abi: aavePoolAbi, functionName: "borrow", args: [r.asset, v, VARIABLE, 0, x.owner] })),
+        `Borrow ${fmt(v, r.asset)} on Aave for you (variable rate)`,
+      );
+      return;
+    }
+    case "aaveRepay": {
+      const r = reserveOf(b.asset);
+      aave.add(r);
+      const t = r.asset;
+      const data = (v: bigint) => encodeFunctionData({ abi: aavePoolAbi, functionName: "repay", args: [t, v, VARIABLE, x.owner] });
+      if (b.amount.kind === "fixed") {
+        const v = toUnits(b.amount, t);
+        out.add(approve(t, AAVE_POOL, v), `Approve ${fmt(v, t)} to Aave`);
+        out.add(call(AAVE_POOL, data(v)), `Repay ${fmt(v, t)} of your Aave debt`);
+        return;
+      }
+      out.add(approve(t, AAVE_POOL, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Aave for the repayment`);
+      if (b.amount.kind === "allDebt") {
+        // Aave rejects type(uint256).max on behalf of someone else: repay all = the live debt token balance.
+        out.add(call(AAVE_POOL, data(0n), balancePatch(arg(1), r.debtToken.address, x.owner)), `Repay ${amountText(b.amount, t)}`);
+      } else {
+        out.add(call(AAVE_POOL, data(0n), heldPatch(x, arg(1), t)), `Repay up to all ${label(t)} of your Aave debt`);
+      }
+      return;
+    }
+    case "guardAaveNoDebt": {
+      const r = reserveOf(b.asset);
+      aave.add(r);
+      out.add(
+        call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertMaxBalance", args: [r.debtToken.address, x.owner, 0n] })),
+        `Check: no ${label(r.asset)} debt left on Aave`,
+      );
+      return;
+    }
+    case "guardAaveHealth": {
+      out.add(
+        call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertMinAaveHealth", args: [x.owner, healthWad(b.min)] })),
+        `Check: Aave health factor ≥ ${b.min}`,
       );
       return;
     }
@@ -363,13 +511,18 @@ export async function compileFlow(blocks: Block[], x: CompileContext): Promise<P
   const top = new Out(0);
   const swaps: Record<string, Swap> = {};
   const used = new Set<string>();
-  for (const b of blocks) await compileBlock(b, x, top, swaps, used);
-  top.steps.push({ text: "Send every leftover token back to your wallet", depth: 0 });
+  const aave = new Set<AaveReserve>();
+  for (const b of blocks) await compileBlock(b, x, top, swaps, used, aave);
+  top.steps.push({ text: is7702(x) ? "Leftovers stay in your wallet" : "Send every leftover token back to your wallet", depth: 0 });
+  // 7702: the delegate tracks these so the plan can't spend more of them than it allots.
+  const sweep = is7702(x) ? TRACKED_TOKENS : SWEEP_TOKENS;
 
   const markets = MARKETS.filter((m) => used.has(m.key));
   const market = markets[0] ?? MARKETS[0];
   const tokens = new Set<string>();
   for (const m of markets) [m.loanToken, m.series.tokenOut, m.series.pt, m.series.yt].forEach((t) => tokens.add(getAddress(t)));
+  const reserves = AAVE_RESERVES.filter((r) => aave.has(r));
+  for (const r of reserves) [r.asset, r.aToken.address, r.debtToken.address].forEach((t) => tokens.add(t));
   for (const b of walk(blocks)) {
     if (b.type === "pull") tokens.add(getAddress(b.token));
     if (b.type === "swap") [b.sell, b.buy].forEach((t) => tokens.add(getAddress(t)));
@@ -384,13 +537,14 @@ export async function compileFlow(blocks: Block[], x: CompileContext): Promise<P
     market,
     markets,
     tokens: [...tokens] as Address[],
+    aave: reserves.length > 0 || allBlocks(blocks).some((b) => b.type === "guardAaveHealth"),
     owner: x.owner,
     executor: x.executor,
     calls: top.calls,
-    sweep: SWEEP_TOKENS,
+    sweep,
     steps: top.steps,
     planHash,
-    data: encodeExecute(top.calls, SWEEP_TOKENS, planHash),
+    data: encodeExecute(top.calls, sweep, planHash),
     swap: swapList[0],
     swaps,
   };

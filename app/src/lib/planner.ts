@@ -1,7 +1,7 @@
 import type { Address, PublicClient } from "viem";
 import { enter, flashUnwind, partialUnwind } from "./compiler/plans";
 import type { Plan, Swap } from "./compiler/types";
-import { healthFactor, previewRedeemPt, type PositionView } from "./positions";
+import { healthFactor, previewRedeemPt, tokenOutValue, usd3RedeemablePt, type PositionView } from "./positions";
 import { quoteExactIn, quoteForMinOut, type QuoteConfig } from "./quotes";
 import type { Market } from "./registry";
 
@@ -18,9 +18,23 @@ export type UnwindMode = "unwind" | "deleverage" | "partial";
  */
 export function unwindMode(p: PositionView): UnwindMode {
   if (p.matched === p.collateral) return "unwind";
-  // Keep 0.5% margin for redemption rounding and the swap on USDT markets.
-  if ((p.proceedsMatched * 9_950n) / BPS >= p.debt) return "deleverage";
+  // Keep 0.5% margin for redemption rounding and the swap on USDT / reUSD markets.
+  if ((p.valueMatched * 9_950n) / BPS >= p.debt) return "deleverage";
   return "partial";
+}
+
+/**
+ * The position as a max unwind sees it: `matched` (the PT your YT covers) capped at the PT that
+ * 3Jane's USDC reserve can pay out right now, with the proceeds previewed for the capped amount.
+ * When the reserve is the smaller limit, the unwind built from this drains it. USD3 series only.
+ */
+export async function capToReserve(client: PublicClient, p: PositionView): Promise<PositionView> {
+  if (!p.market.series.viaUsd3) throw new Error(`Max unwind sizes to 3Jane's reserve; ${p.market.label} doesn't redeem through 3Jane.`);
+  const reserve = await usd3RedeemablePt(client, p.market.series);
+  if (reserve >= p.matched) return p;
+  const proceeds = await previewRedeemPt(client, p.market, reserve);
+  // SY-USD3 pays USDC, which counts 1:1 against the debt.
+  return { ...p, matched: reserve, proceedsMatched: proceeds, valueMatched: proceeds };
 }
 
 function needsSwap(m: Market): boolean {
@@ -46,12 +60,12 @@ export async function buildUnwind(client: PublicClient, p: PositionView, o: Buil
 
   if (mode === "partial") {
     // Repay 99% of what the matched PT redeems for; the loop that remains gets safer (§6.3).
-    let repayAssets = (p.proceedsMatched * 9_900n) / BPS;
+    let repayAssets = (p.valueMatched * 9_900n) / BPS;
     let swap: Swap | undefined;
     if (needsSwap(m)) {
-      // Proceeds are in tokenOut (USDC); repay in loanToken (USDT). Size the repayment to
-      // what the swap of most of the proceeds will buy.
-      repayAssets = (p.proceedsMatched * 9_850n) / BPS;
+      // Proceeds are in tokenOut (USDC / reUSD); repay in loanToken (USDT / USDC). Size the
+      // repayment to what the swap of most of the proceeds will buy.
+      repayAssets = (p.valueMatched * 9_850n) / BPS;
       swap = o.reuseSwap ?? (await quoteForMinOut(o.quotes, m.series.tokenOut, m.loanToken, repayAssets, o.executor, o.headroomBps));
       repayAssets = swap.minOut;
     }
@@ -76,9 +90,9 @@ export async function buildUnwind(client: PublicClient, p: PositionView, o: Buil
 
 export type EnterOptions = BuildOptions & { equity: bigint; leverageBps: bigint; minHealth: bigint };
 
-/** §7.4 Enter: flash = equity × (leverage − 1). */
-export async function buildEnter(m: Market, o: EnterOptions): Promise<Plan> {
-  const flash = (o.equity * (o.leverageBps - BPS)) / BPS;
+/** §7.4 Enter: equity in tokenOut, flash = its USDC value × (leverage − 1). */
+export async function buildEnter(client: PublicClient, m: Market, o: EnterOptions): Promise<Plan> {
+  const flash = ((await tokenOutValue(client, m.series, o.equity)) * (o.leverageBps - BPS)) / BPS;
   const swap = needsSwap(m) ? await quoteExactIn(o.quotes, m.loanToken, m.series.tokenOut, flash, o.executor) : undefined;
   return enter({ market: m, owner: o.owner, executor: o.executor, equity: o.equity, flash, minHealth: o.minHealth, swap });
 }

@@ -2,19 +2,129 @@ import { useState } from "react";
 import { getAddress, isAddress } from "viem";
 import { AddressLink, Card, Notice, SentLine, useSendTx } from "../components/common";
 import { usePoll } from "../hooks";
+import { DELEGATE } from "../lib/abis";
 import { DEV_FORK, publicClient } from "../lib/chain";
-import { deployData, setupSteps } from "../lib/executor";
+import { aaveSetupSteps, deployData, deployDelegateTx, initializeTx, setupSteps, type SetupStep } from "../lib/executor";
 import { PROTECTED_RPCS } from "../lib/mev";
 import { useApp } from "../state";
 
 export function SetupPage() {
   const app = useApp();
+  // Delegated to the Covenant delegate: your account runs plans itself, no Executor or permissions.
+  const self = app.delegation?.kind === "covenant";
   return (
     <>
       <MevStep />
-      {app.conn ? <ExecutorStep /> : <Card title="2. Your Executor">Connect Rabby to continue.</Card>}
-      {app.conn && app.executor && app.executorCheck?.ok && <PermissionSteps />}
+      {!app.conn && <Card title="2. Your Executor">Connect Rabby to continue.</Card>}
+      {app.conn && !self && <ExecutorStep />}
+      {app.conn && !self && app.executor && app.executorCheck?.ok && (
+        <>
+          <PermissionSteps
+            title="3. Permissions for your Executor"
+            intro="One-time. After this every unwind is a single transaction. You can revoke all of it at any time (Access)."
+            steps={setupSteps(app.executor)}
+          />
+          <PermissionSteps
+            title="4. Aave v3 (optional)"
+            intro="Only for the Aave Borrow and Withdraw blocks; supplying and repaying need nothing. Revocable at any time (Access)."
+            steps={aaveSetupSteps(app.executor)}
+          />
+        </>
+      )}
+      {app.conn && <DelegationStep />}
     </>
+  );
+}
+
+/**
+ * EIP-7702 mode (docs/SPEC.md §5.4): your EOA delegates to the shared Covenant delegate and runs
+ * plans itself. Signing the delegation needs a Ledger Ethereum app that whitelists the delegate,
+ * so that step happens in a terminal (ledger/build-app.sh, app/scripts/ledger7702.mjs).
+ */
+function DelegationStep() {
+  const app = useApp();
+  const tx = useSendTx();
+  const owner = app.conn!.account;
+  const d = app.delegation;
+  const { data: delegateCode, refresh } = usePoll(() => publicClient.getCode({ address: DELEGATE }), [app.version], 60_000);
+  const deployed = !!delegateCode && delegateCode !== "0x";
+  const run = (t: { to: `0x${string}`; data: `0x${string}` }) => void tx.run(t).then(() => (refresh(), app.bump()));
+
+  if (d?.kind === "covenant") {
+    return (
+      <Card title="2. Your account runs plans itself (EIP-7702)">
+        <p className="row">
+          Delegated to <AddressLink address={DELEGATE} />{" "}
+          {app.executorCheck === undefined ? (
+            <span className="pill">verifying…</span>
+          ) : app.executorCheck.ok ? (
+            <span className="pill ok">verified: CovenantDelegateMainnet, allowlist v{String(d.configVersion)}</span>
+          ) : (
+            <span className="pill danger">not trusted: {app.executorCheck.reason}</span>
+          )}
+        </p>
+        <p className="small muted">
+          No Executor, approvals or Morpho authorization: plans are transactions to your own address. A plan can only
+          use what it allots from your wallet, and allowances it grants are reset when it ends.
+        </p>
+        {d.configVersion !== d.expected && (
+          <div className="row">
+            <span className="grow">Update the allowlist stored in your account (v{String(d.configVersion)} → v{String(d.expected)})</span>
+            <button disabled={tx.busy || !!app.signBlockedReason} onClick={() => run(initializeTx(owner))} data-testid="delegate-initialize">
+              Send
+            </button>
+          </div>
+        )}
+        <p className="small">
+          Undo at any time from a terminal, with the official Ethereum app: <code>cd app && node scripts/ledger7702.mjs revoke</code>
+        </p>
+        {tx.error && <Notice tone="danger">{tx.error}</Notice>}
+        <SentLine tx={tx.last} />
+      </Card>
+    );
+  }
+
+  return (
+    <Card title="EIP-7702 mode (optional · Ledger Nano S Plus)">
+      <p className="small">
+        Instead of an Executor, your account itself runs plans: no approvals, no Morpho authorization, and protocols see
+        your address as the caller. <b>Your whole account runs the delegate's code</b>, so a bug there could reach all
+        your funds, not just what you approved; undo it with one revoke.
+      </p>
+      {d?.kind === "other" && (
+        <Notice tone="warn">
+          Your account already delegates to <AddressLink address={d.delegate} />. Delegating to Covenant replaces it.
+        </Notice>
+      )}
+      <ol className="small">
+        <li>
+          <div className="row">
+            <span className="grow">
+              The shared delegate <AddressLink address={DELEGATE} /> is {deployed ? "deployed" : "not deployed yet"} (once, by
+              anyone; the address follows from the code).
+            </span>
+            {!deployed && (
+              <button disabled={tx.busy || !!app.signBlockedReason} onClick={() => void deployDelegateTx().then(run)} data-testid="deploy-delegate">
+                Deploy
+              </button>
+            )}
+          </div>
+        </li>
+        <li>
+          Build and sideload an Ethereum app that whitelists this delegate (Ledger only signs 7702 delegations to whitelisted
+          contracts; needs Docker and <code>pip install ledgerblue</code>): <code>./ledger/build-app.sh --load</code>
+        </li>
+        <li>On the Ledger, open that app → Settings: enable <b>EIP-7702</b> and <b>Blind signing</b>.</li>
+        <li>
+          Close Rabby and Ledger Live (they hold the USB connection), then sign the delegation and the allowlist setup in one
+          transaction: <code>cd app && node scripts/ledger7702.mjs delegate</code>
+        </li>
+        <li>Remove the sideloaded app and reinstall the official Ethereum app: plans and revoking work with it.</li>
+      </ol>
+      <button onClick={app.bump}>Check again</button>
+      {tx.error && <Notice tone="danger">{tx.error}</Notice>}
+      <SentLine tx={tx.last} />
+    </Card>
   );
 }
 
@@ -111,21 +221,18 @@ function ExecutorStep() {
   );
 }
 
-function PermissionSteps() {
+function PermissionSteps({ title, intro, steps }: { title: string; intro: string; steps: SetupStep[] }) {
   const app = useApp();
   const owner = app.conn!.account;
   const executor = app.executor!;
-  const steps = setupSteps(executor);
   const tx = useSendTx();
   const { data: done, refresh } = usePoll(
     () => Promise.all(steps.map((s) => s.isDone(publicClient, owner, executor))),
     [owner, executor, app.version],
   );
   return (
-    <Card title="3. Permissions for your Executor">
-      <p className="small muted">
-        One-time. After this every unwind is a single transaction. You can revoke all of it at any time (Access).
-      </p>
+    <Card title={title}>
+      <p className="small muted">{intro}</p>
       <ul className="steps">
         {steps.map((s, i) => (
           <li key={s.id} className="row">

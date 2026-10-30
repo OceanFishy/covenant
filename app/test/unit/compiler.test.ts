@@ -10,14 +10,14 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { erc20Abi, executorAbi, morphoAbi, ytAbi } from "../../src/lib/abis";
+import { delegateAbi, erc20Abi, executorAbi, morphoAbi, ytAbi } from "../../src/lib/abis";
 import { callsType } from "../../src/lib/compiler/encode";
 import { enter, flashUnwind, partialUnwind } from "../../src/lib/compiler/plans";
 import { Source, type Call, type Swap } from "../../src/lib/compiler/types";
 import { unwindMode } from "../../src/lib/planner";
 import type { PositionView } from "../../src/lib/positions";
 import { quoteForMinOut, type QuoteConfig } from "../../src/lib/quotes";
-import { MARKETS, MORPHO, SWEEP_TOKENS, TOKENS } from "../../src/lib/registry";
+import { MARKETS, MORPHO, SWEEP_TOKENS, TOKENS, TRACKED_TOKENS } from "../../src/lib/registry";
 import { decodeRevert, isSwapFailure } from "../../src/lib/simulate";
 
 const [A, , USDT_MARKET] = MARKETS;
@@ -132,11 +132,41 @@ describe("partial and enter", () => {
   });
 });
 
+describe("EIP-7702 mode (executor = owner)", () => {
+  const self = { market: A, owner, executor: owner };
+  const collateral = 1_000_000n * 10n ** 6n;
+  const allCalls = (p: { calls: Call[] }) => [...p.calls, ...p.calls.flatMap((c) => (c.target === MORPHO && decodeFunctionData({ abi: morphoAbi, data: c.data }).functionName === "flashLoan" ? innerOfFlash(c) : []))];
+
+  it("allots wallet funds instead of pulling them, and never calls transferFrom", () => {
+    const p = flashUnwind({ ...self, collateral, matched: collateral, syMinOut: 0n, minReceive: 5n });
+    const pull = decodeFunctionData({ abi: delegateAbi, data: p.calls[1].data });
+    expect(p.calls[1].target).toBe(owner);
+    expect(pull.functionName).toBe("allot");
+    expect(pull.args).toEqual([A.series.yt, collateral]);
+    for (const c of allCalls(p)) expect(c.data.slice(0, 10)).not.toBe("0x23b872dd"); // transferFrom
+    expect(p.sweep).toEqual(TRACKED_TOKENS);
+  });
+
+  it("measures the plan's own balance (OWNED), never the wallet's whole balance", () => {
+    const p = enter({ ...self, equity: 1000n, flash: 2000n, minHealth: 10n ** 18n });
+    const patches = allCalls(p).flatMap((c) => c.patches);
+    expect(patches.length).toBeGreaterThan(0);
+    for (const patch of patches) expect(patch.source).toBe(Source.OWNED);
+  });
+
+  it("checks outputs with assertMinOwned", () => {
+    const p = flashUnwind({ ...self, collateral, matched: collateral, syMinOut: 0n, minReceive: 5n });
+    const guard = decodeFunctionData({ abi: executorAbi, data: p.calls.at(-1)!.data });
+    expect(guard.functionName).toBe("assertMinOwned");
+    expect(guard.args).toEqual([A.series.tokenOut, 5n]);
+  });
+});
+
 describe("unwindMode", () => {
   const base = { collateral: 1000n, debt: 800n, proceedsAll: 1000n } as PositionView;
-  it("unwind when YT covers all PT", () => expect(unwindMode({ ...base, matched: 1000n, proceedsMatched: 1000n })).toBe("unwind"));
-  it("deleverage when matched proceeds repay the debt", () => expect(unwindMode({ ...base, matched: 900n, proceedsMatched: 900n })).toBe("deleverage"));
-  it("partial otherwise", () => expect(unwindMode({ ...base, matched: 400n, proceedsMatched: 400n })).toBe("partial"));
+  it("unwind when YT covers all PT", () => expect(unwindMode({ ...base, matched: 1000n, valueMatched: 1000n })).toBe("unwind"));
+  it("deleverage when matched proceeds repay the debt", () => expect(unwindMode({ ...base, matched: 900n, valueMatched: 900n })).toBe("deleverage"));
+  it("partial otherwise", () => expect(unwindMode({ ...base, matched: 400n, valueMatched: 400n })).toBe("partial"));
 });
 
 describe("decodeRevert", () => {
@@ -180,6 +210,30 @@ describe("quoteForMinOut", () => {
     expect(s.minOut).toBe(minOut);
     expect(s.quotedOut).toBeGreaterThanOrEqual((minOut * 10_010n) / 10_000n);
     expect(s.amountIn).toBeGreaterThan(minOut);
+    vi.unstubAllGlobals();
+  });
+
+  it("probes in the sell token's decimals (reUSD 18dp → USDC 6dp)", async () => {
+    // Fake Kyber at 1.1 USDC per reUSD.
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/routes?")) {
+        const amountIn = BigInt(new URL(url, "http://x").searchParams.get("amountIn")!);
+        const out = (amountIn * 11n) / 10n / 10n ** 12n;
+        return new Response(JSON.stringify({ data: { routeSummary: { amountIn: amountIn.toString(), amountOut: out.toString() } } }));
+      }
+      const body = JSON.parse(String(init!.body));
+      return new Response(
+        JSON.stringify({ data: { routerAddress: "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5", data: "0xe21fd0e9", amountOut: body.routeSummary.amountOut } }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const cfg: QuoteConfig = { aggregator: "kyber", zeroXBase: "", kyberBase: "http://kyber" };
+    const minOut = 1_000_000n * 10n ** 6n; // 1M USDC
+    const s = await quoteForMinOut(cfg, TOKENS.reUSD.address as Address, TOKENS.USDC.address as Address, minOut, executor, 10);
+    expect(s.quotedOut).toBeGreaterThanOrEqual((minOut * 10_010n) / 10_000n);
+    // ≈ 1.001M / 1.1 reUSD: sized from the probed rate, not a 1:1 face-value guess.
+    expect(s.amountIn).toBeGreaterThan(909_000n * 10n ** 18n);
+    expect(s.amountIn).toBeLessThan(911_000n * 10n ** 18n);
     vi.unstubAllGlobals();
   });
 });

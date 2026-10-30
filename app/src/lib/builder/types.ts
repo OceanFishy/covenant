@@ -15,15 +15,21 @@ export type Debt = { kind: "debt"; market: string; bps: number };
 export type Collateral = { kind: "collateral" };
 /** Repay by shares: all of the owner's debt, no dust. */
 export type AllShares = { kind: "allShares" };
+/** The owner's live Aave variable debt in `asset` (+bps), at execution time. */
+export type AaveDebt = { kind: "aaveDebt"; asset: Address; bps: number };
+/** Aave repay: exactly the owner's live variable debt in the block's asset. */
+export type AllDebt = { kind: "allDebt" };
+/** Aave withdraw: all of the owner's supply (aToken balance) of the block's asset. */
+export type Supplied = { kind: "supplied" };
 
-export type Amount = Fixed | Balance | Debt | Collateral | AllShares;
+export type Amount = Fixed | Balance | Debt | Collateral | AllShares | AaveDebt | AllDebt | Supplied;
 
 type Base = { id: string };
 
 export type Block =
   | (Base & { type: "accrueInterest"; market: string })
   | (Base & { type: "pull"; token: Address; amount: Fixed })
-  | (Base & { type: "flashLoan"; token: Address; amount: Fixed | Debt; children: Block[] })
+  | (Base & { type: "flashLoan"; token: Address; amount: Fixed | Debt | AaveDebt; children: Block[] })
   | (Base & { type: "repay"; market: string; amount: AllShares | Fixed | Balance })
   | (Base & { type: "withdrawCollateral"; market: string; amount: Collateral | Fixed })
   | (Base & { type: "supplyCollateral"; market: string; amount: Balance | Fixed })
@@ -35,13 +41,20 @@ export type Block =
       type: "swap";
       sell: Address;
       buy: Address;
-      /** exactIn: sell `amount`; minOut: buy at least `amount` (fixed, or a market's debt). */
+      /** exactIn: sell `amount`; minOut: buy at least `amount` (fixed, or a Morpho / Aave debt). */
       mode: "exactIn" | "minOut";
-      amount: Fixed | Debt;
+      amount: Fixed | Debt | AaveDebt;
     })
   | (Base & { type: "guardMinBalance"; token: Address; min: Fixed })
   | (Base & { type: "guardNoDebt"; market: string })
-  | (Base & { type: "guardMinHealth"; market: string; min: string });
+  | (Base & { type: "guardMinHealth"; market: string; min: string })
+  // Aave v3 Core. `asset` is the reserve's underlying (USDC / USDT); positions are the owner's.
+  | (Base & { type: "aaveSupply"; asset: Address; amount: Balance | Fixed })
+  | (Base & { type: "aaveWithdraw"; asset: Address; amount: Supplied | Fixed })
+  | (Base & { type: "aaveBorrow"; asset: Address; amount: Fixed })
+  | (Base & { type: "aaveRepay"; asset: Address; amount: AllDebt | Balance | Fixed })
+  | (Base & { type: "guardAaveNoDebt"; asset: Address })
+  | (Base & { type: "guardAaveHealth"; min: string });
 
 export type BlockType = Block["type"];
 

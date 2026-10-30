@@ -24,6 +24,18 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "warn" | "
   return <div className={`notice ${tone}`}>{children}</div>;
 }
 
+/** docs/SPEC.md §6.5: shown wherever a PT-reUSD loop is entered or exited. */
+export function ReUsdRiskNote() {
+  return (
+    <Notice tone="warn">
+      reUSD carries reinsurance underwriting risk: a payout event can produce negative yield, which matters for a
+      leveraged loop near its LLTV. Covenant can't mint or redeem with Re (KYC-gated), so reUSD is bought and sold
+      against USDC on DEXes (about 0.4% under Re's NAV at 1–5M); exits sell only what repays the debt and return the
+      rest as reUSD.
+    </Notice>
+  );
+}
+
 export function AddressLink({ address }: { address: Address }) {
   return (
     <a className="mono" href={`${EXPLORER}/address/${address}`} target="_blank" rel="noreferrer">

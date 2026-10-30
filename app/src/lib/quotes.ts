@@ -1,5 +1,6 @@
 import { getAddress, type Address, type Hex } from "viem";
 import type { Swap } from "./compiler/types";
+import { tokenInfo } from "./registry";
 
 /** Where aggregator APIs are reached. The app uses the local Vite proxy (which adds the 0x key). */
 export type QuoteConfig = {
@@ -60,9 +61,10 @@ export async function quote(
 }
 
 /**
- * Buys at least `minOut` of buyToken while selling as little as possible (stablecoins, same
- * decimals). Quotes target minOut + `headroomBps` so the route has room to drift before
- * execution; routes differ between sizes, so a short quote is scaled up and re-quoted (max 3).
+ * Buys at least `minOut` of buyToken while selling as little as possible. Quotes target minOut +
+ * `headroomBps` so the route has room to drift before execution. The first quote probes the rate
+ * by selling minOut's face value in sellToken units (USDC → USDT, or reUSD → USDC: 18 vs 6
+ * decimals); routes differ between sizes, so a short quote is scaled up and re-quoted (max 3).
  */
 export async function quoteForMinOut(
   cfg: QuoteConfig,
@@ -73,8 +75,9 @@ export async function quoteForMinOut(
   headroomBps: number,
 ): Promise<Swap> {
   const target = (minOut * BigInt(10_000 + headroomBps)) / 10_000n;
-  const probe = await quote(cfg, sellToken, buyToken, minOut, taker);
-  let sell = (minOut * target) / probe.quotedOut;
+  const probeIn = (minOut * 10n ** BigInt(tokenInfo(sellToken).decimals)) / 10n ** BigInt(tokenInfo(buyToken).decimals);
+  const probe = await quote(cfg, sellToken, buyToken, probeIn, taker);
+  let sell = (probeIn * target) / probe.quotedOut;
   for (let i = 0; i < 3; i++) {
     const q = await quote(cfg, sellToken, buyToken, sell, taker);
     if (q.quotedOut >= target) return { ...q, minOut };

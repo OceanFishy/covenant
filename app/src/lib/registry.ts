@@ -9,8 +9,13 @@ export type PendleSeries = {
   yt: Address;
   sy: Address;
   expiry: number; // unix seconds
+  /** PT and YT decimals (the SY asset's, USDC for both series) and SY decimals. */
+  ptDecimals: number;
+  syDecimals: number;
   /** Token SY redeems to and deposits from. */
   tokenOut: Address;
+  /** SY redeems and deposits through 3Jane's USD3 (its USDC reserve and deposit cap apply). */
+  viaUsd3: boolean;
 };
 
 export type Market = {
@@ -37,6 +42,35 @@ export const TOKENS = {
 export const MORPHO: Address = getAddress(registry.morpho.blue);
 export const ZEROX_ALLOWANCE_HOLDER: Address = getAddress(registry.aggregators["0x"].allowanceHolder);
 export const KYBER_ROUTER: Address = getAddress(registry.aggregators.kyberswap.router);
+/** Re's official reUSD redemption entry point (read-only: fee and status for comparisons). */
+export const RE_REDEMPTION_GATEWAY: Address = getAddress(registry.re.redemptionGateway);
+
+/** Aave v3 Core: the Pool and, per supported reserve, its aToken and variable debt token. */
+export const AAVE_POOL: Address = getAddress(registry.aave.pool);
+
+export type AaveReserve = { symbol: string; asset: Address; aToken: Token; debtToken: Token };
+
+function aaveReserve(symbol: keyof typeof registry.aave.reserves): AaveReserve {
+  const r = registry.aave.reserves[symbol];
+  const asset = TOKENS[symbol];
+  return {
+    symbol,
+    asset: asset.address,
+    aToken: { symbol: r.aTokenSymbol, address: getAddress(r.aToken), decimals: asset.decimals },
+    debtToken: { symbol: r.variableDebtTokenSymbol, address: getAddress(r.variableDebtToken), decimals: asset.decimals },
+  };
+}
+
+export const AAVE_RESERVES: AaveReserve[] = [aaveReserve("USDC"), aaveReserve("USDT")];
+
+/** The Aave reserve for an underlying asset (USDC / USDT). */
+export function reserveOf(asset: Address): AaveReserve {
+  const r = AAVE_RESERVES.find((x) => x.asset.toLowerCase() === asset.toLowerCase());
+  if (!r) throw new Error(`${asset} is not a supported Aave reserve`);
+  return r;
+}
+
+const AAVE_TOKENS: Token[] = AAVE_RESERVES.flatMap((r) => [r.aToken, r.debtToken]);
 
 function series(name: keyof typeof registry.pendle, tokenOut: Address): PendleSeries {
   const s = registry.pendle[name];
@@ -46,12 +80,16 @@ function series(name: keyof typeof registry.pendle, tokenOut: Address): PendleSe
     yt: getAddress(s.yt),
     sy: getAddress(s.sy),
     expiry: Math.floor(Date.parse(s.expiry) / 1000),
+    ptDecimals: s.ptDecimals,
+    syDecimals: s.syDecimals,
     tokenOut,
+    viaUsd3: s.syTokensOut.includes("USD3"),
   };
 }
 
 export const SERIES = {
   "PT-USD3-17DEC2026": series("PT-USD3-17DEC2026", TOKENS.USDC.address),
+  // SY-reUSD only takes and returns reUSD: loops swap reUSD <-> USDC through an aggregator.
   "PT-reUSD-10DEC2026": series("PT-reUSD-10DEC2026", TOKENS.reUSD.address),
 };
 
@@ -70,18 +108,19 @@ function market(key: keyof typeof registry.morpho.markets, label: string, s: Pen
   };
 }
 
-/** Markets with full unwind support in v1. PT-reUSD exits need a reUSD route (M3). */
 export const MARKETS: Market[] = [
   market("PT-USD3-17DEC2026/USDC (A)", "PT-USD3 / USDC · A", SERIES["PT-USD3-17DEC2026"]),
   market("PT-USD3-17DEC2026/USDC (B)", "PT-USD3 / USDC · B", SERIES["PT-USD3-17DEC2026"]),
   market("PT-USD3-17DEC2026/USDT", "PT-USD3 / USDT", SERIES["PT-USD3-17DEC2026"]),
+  market("PT-reUSD-10DEC2026/USDC", "PT-reUSD / USDC", SERIES["PT-reUSD-10DEC2026"]),
 ];
 
 const LABELS = new Map<string, string>([
   [MORPHO.toLowerCase(), "Morpho Blue"],
+  [AAVE_POOL.toLowerCase(), "Aave v3 Pool"],
   [ZEROX_ALLOWANCE_HOLDER.toLowerCase(), "0x AllowanceHolder"],
   [KYBER_ROUTER.toLowerCase(), "KyberSwap router"],
-  ...Object.values(TOKENS).map((tk) => [tk.address.toLowerCase(), tk.symbol] as [string, string]),
+  ...[...Object.values(TOKENS), ...AAVE_TOKENS].map((tk) => [tk.address.toLowerCase(), tk.symbol] as [string, string]),
   ...Object.values(SERIES).flatMap((s) => [
     [s.pt.toLowerCase(), s.name] as [string, string],
     [s.yt.toLowerCase(), s.name.replace(/^PT/, "YT")] as [string, string],
@@ -99,14 +138,12 @@ export function short(address: string): string {
 }
 
 export function tokenInfo(address: Address): Token {
-  const known = Object.values(TOKENS).find((tk) => tk.address.toLowerCase() === address.toLowerCase());
+  const known = [...Object.values(TOKENS), ...AAVE_TOKENS].find((tk) => tk.address.toLowerCase() === address.toLowerCase());
   if (known) return known;
-  // PT / YT / SY of the USD3 and reUSD series use their underlying's decimals.
   for (const s of Object.values(SERIES)) {
-    if ([s.pt, s.yt, s.sy].some((a) => a.toLowerCase() === address.toLowerCase())) {
-      const underlying = s.name.includes("reUSD") ? TOKENS.reUSD : TOKENS.USD3;
-      return { symbol: label(address), address, decimals: underlying.decimals };
-    }
+    const a = address.toLowerCase();
+    if (a === s.pt.toLowerCase() || a === s.yt.toLowerCase()) return { symbol: label(address), address, decimals: s.ptDecimals };
+    if (a === s.sy.toLowerCase()) return { symbol: label(address), address, decimals: s.syDecimals };
   }
   return { symbol: short(address), address, decimals: 18 };
 }
@@ -116,8 +153,15 @@ export const SWEEP_TOKENS: Address[] = [
   TOKENS.USDC.address,
   TOKENS.USDT.address,
   TOKENS.USD3.address,
+  TOKENS.reUSD.address,
   ...MARKETS.flatMap((m) => [m.series.pt, m.series.yt, m.series.sy]),
 ].filter((a, i, all) => all.findIndex((b) => b.toLowerCase() === a.toLowerCase()) === i);
+
+/**
+ * Under EIP-7702 the delegate snapshots these at the start of a plan, and the plan may only
+ * spend what it allots of them. Aave aTokens are included: a withdrawal burns them.
+ */
+export const TRACKED_TOKENS: Address[] = [...SWEEP_TOKENS, ...AAVE_RESERVES.map((r) => r.aToken.address)];
 
 /** Tokens the Access panel checks for approvals to an Executor. */
 export const APPROVAL_TOKENS: Address[] = [
@@ -126,4 +170,5 @@ export const APPROVAL_TOKENS: Address[] = [
   TOKENS.USD3.address,
   TOKENS.reUSD.address,
   ...Object.values(SERIES).flatMap((s) => [s.pt, s.yt, s.sy]),
+  ...AAVE_RESERVES.map((r) => r.aToken.address),
 ];

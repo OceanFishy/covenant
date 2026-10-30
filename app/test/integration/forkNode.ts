@@ -54,6 +54,9 @@ export async function impersonate(client: PublicClient, who: Address) {
 
 const slotCache = new Map<string, bigint>();
 
+/** OpenZeppelin ERC20Upgradeable's ERC-7201 storage base (balances mapping first), e.g. reUSD. */
+const OZ_ERC20_7201 = 0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00n;
+
 /** Sets an ERC-20 balance by finding the `mapping(address => uint256)` balance slot. */
 export async function setTokenBalance(client: PublicClient, token: Address, who: Address, amount: bigint) {
   const req = client.request as (a: { method: string; params: unknown[] }) => Promise<unknown>;
@@ -65,7 +68,7 @@ export async function setTokenBalance(client: PublicClient, token: Address, who:
 
   const cached = slotCache.get(token.toLowerCase());
   if (cached !== undefined) return void (await write(cached, amount));
-  for (let slot = 0n; slot < 200n; slot++) {
+  for (const slot of [...Array.from({ length: 200 }, (_, i) => BigInt(i)), OZ_ERC20_7201]) {
     const original = (await req({ method: "eth_getStorageAt", params: [token, at(slot), "latest"] })) as Hex;
     await write(slot, amount);
     if ((await read()) === amount) {

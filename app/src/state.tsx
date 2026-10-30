@@ -1,7 +1,7 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Address } from "viem";
 import { publicClient } from "./lib/chain";
-import { currentExecutor, knownExecutors, rememberExecutor, verifyExecutor, type Verification } from "./lib/executor";
+import { currentExecutor, knownExecutors, readDelegation, rememberExecutor, verifyExecutor, type Delegation, type Verification } from "./lib/executor";
 import { confirmedRpc, confirmRpc, type ProtectedRpcId } from "./lib/mev";
 import { connect, discoverRabby, wrongNetwork, type Connection, type ProviderDetail } from "./lib/wallet";
 
@@ -11,8 +11,11 @@ type AppState = {
   connectError?: string;
   connectWallet: () => Promise<void>;
   wrongNetwork: boolean;
+  /** The Executor plans run on: a deployed Executor, or your own address in EIP-7702 mode. */
   executor?: Address;
   executorCheck?: Verification;
+  /** Your account's EIP-7702 delegation; `covenant` makes it run plans itself. */
+  delegation?: Delegation;
   executors: Address[];
   useExecutor: (a: Address) => Promise<Verification>;
   mevRpc?: ProtectedRpcId;
@@ -32,6 +35,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [connectError, setConnectError] = useState<string>();
   const [executor, setExecutor] = useState<Address>();
   const [executorCheck, setExecutorCheck] = useState<Verification>();
+  const [delegation, setDelegation] = useState<Delegation>();
   const [mevRpc, setMevRpcState] = useState<ProtectedRpcId | undefined>(confirmedRpc());
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((v) => v + 1), []);
@@ -67,15 +71,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [rabby, conn, connectWallet]);
 
-  // Load and verify the owner's current Executor.
+  // Load and verify where plans run. An account delegated to the Covenant delegate runs them
+  // itself (EIP-7702 mode); otherwise the owner's latest deployed Executor. A refresh (version
+  // bump, e.g. after every transaction) keeps the current values until the new ones arrive:
+  // the delegation read is async, and clearing them would unmount the page mid-flow (Review's
+  // "Done."). They are cleared only when the account changes.
+  const loadedFor = useRef<Address | undefined>(undefined);
+  const shownExecutor = useRef<Address | undefined>(undefined);
   useEffect(() => {
-    setExecutor(undefined);
-    setExecutorCheck(undefined);
+    if (loadedFor.current !== conn?.account) {
+      loadedFor.current = conn?.account;
+      shownExecutor.current = undefined;
+      setExecutor(undefined);
+      setExecutorCheck(undefined);
+      setDelegation(undefined);
+    }
     if (!conn) return;
-    const ex = currentExecutor(conn.account);
-    if (!ex) return;
-    setExecutor(ex);
-    void verifyExecutor(publicClient, ex, conn.account).then(setExecutorCheck);
+    const owner = conn.account;
+    let live = true;
+    void readDelegation(publicClient, owner)
+      .catch((): Delegation => ({ kind: "none" }))
+      .then((d) => {
+        if (!live) return;
+        setDelegation(d);
+        const ex = d.kind === "covenant" ? owner : currentExecutor(owner);
+        // A different Executor must not inherit the previous one's verification.
+        if (shownExecutor.current !== ex) setExecutorCheck(undefined);
+        shownExecutor.current = ex;
+        setExecutor(ex);
+        if (!ex) return;
+        void verifyExecutor(publicClient, ex, owner).then((c) => live && setExecutorCheck(c));
+      });
+    return () => {
+      live = false;
+    };
   }, [conn, version]);
 
   const useExecutor = useCallback(
@@ -105,6 +134,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       wrongNetwork: conn ? wrongNetwork(conn) : false,
       executor,
       executorCheck,
+      delegation,
       executors: conn ? knownExecutors(conn.account) : [],
       useExecutor,
       mevRpc,
@@ -113,7 +143,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       bump,
     };
     return { ...base, signBlockedReason: signBlocker(base) };
-  }, [rabby, conn, connectError, connectWallet, executor, executorCheck, useExecutor, mevRpc, setMevRpc, version, bump]);
+  }, [rabby, conn, connectError, connectWallet, executor, executorCheck, delegation, useExecutor, mevRpc, setMevRpc, version, bump]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

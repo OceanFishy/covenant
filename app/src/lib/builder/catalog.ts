@@ -2,7 +2,7 @@ import type { Address } from "viem";
 import { MARKETS, SERIES, TOKENS } from "../registry";
 import type { Block, BlockType } from "./types";
 
-export type Group = "Wallet" | "Morpho" | "Pendle" | "Swap" | "Guard";
+export type Group = "Wallet" | "Morpho" | "Aave" | "Pendle" | "Swap" | "Guard";
 
 export type BlockDef = {
   type: BlockType;
@@ -88,15 +88,15 @@ export const CATALOG: BlockDef[] = [
     type: "redeemSY",
     title: "Redeem SY",
     group: "Pendle",
-    hint: "All SY → USDC / USD3 (SY-USD3 redeems through 3Jane)",
-    keywords: "redeem sy usd3 3jane",
+    hint: "All SY → USDC / USD3 (SY-USD3, via 3Jane) or reUSD (SY-reUSD)",
+    keywords: "redeem sy usd3 3jane reusd",
     create: (id) => ({ id, type: "redeemSY", series: S0, tokenOut: USDC, minOut: { kind: "fixed", value: "0" } }),
   },
   {
     type: "mintPY",
     title: "Mint PT + YT",
     group: "Pendle",
-    hint: "USDC / USD3 → SY → PT + YT at par (no trading)",
+    hint: "USDC / USD3 / reUSD → SY → PT + YT at par (no trading)",
     keywords: "mint pendle deposit enter",
     create: (id) => ({ id, type: "mintPY", series: S0, tokenIn: USDC, amount: { kind: "balance" }, ytTo: "wallet" }),
   },
@@ -104,9 +104,41 @@ export const CATALOG: BlockDef[] = [
     type: "swap",
     title: "Swap stablecoins",
     group: "Swap",
-    hint: "USDC ↔ USDT via 0x / KyberSwap, output checked on-chain",
-    keywords: "swap aggregator usdt usdc 0x kyber",
+    hint: "USDC ↔ USDT or USDC ↔ reUSD via 0x / KyberSwap, output checked on-chain",
+    keywords: "swap aggregator usdt usdc reusd 0x kyber",
     create: (id) => ({ id, type: "swap", sell: USDC, buy: TOKENS.USDT.address, mode: "minOut", amount: { kind: "fixed", value: "0" } }),
+  },
+  {
+    type: "aaveSupply",
+    title: "Supply to Aave",
+    group: "Aave",
+    hint: "Supply USDC / USDT from the Executor to Aave v3 for you",
+    keywords: "aave v3 supply deposit lend",
+    create: (id) => ({ id, type: "aaveSupply", asset: USDC, amount: { kind: "balance" } }),
+  },
+  {
+    type: "aaveWithdraw",
+    title: "Withdraw from Aave",
+    group: "Aave",
+    hint: "Pull your aUSDC / aUSDT and withdraw it into the Executor (needs the aToken approval)",
+    keywords: "aave v3 withdraw redeem atoken",
+    create: (id) => ({ id, type: "aaveWithdraw", asset: USDC, amount: { kind: "supplied" } }),
+  },
+  {
+    type: "aaveBorrow",
+    title: "Borrow on Aave",
+    group: "Aave",
+    hint: "Borrow USDC / USDT for you, into the Executor (needs credit delegation)",
+    keywords: "aave v3 borrow loan",
+    create: (id) => ({ id, type: "aaveBorrow", asset: USDC, amount: { kind: "fixed", value: "0" } }),
+  },
+  {
+    type: "aaveRepay",
+    title: "Repay Aave debt",
+    group: "Aave",
+    hint: "Repay your Aave debt from the Executor (all of it exactly, or an amount)",
+    keywords: "aave v3 repay loan debt",
+    create: (id) => ({ id, type: "aaveRepay", asset: USDC, amount: { kind: "allDebt" } }),
   },
   {
     type: "guardNoDebt",
@@ -131,6 +163,22 @@ export const CATALOG: BlockDef[] = [
     hint: "Revert everything if the Executor holds less than a minimum (before it sends it to you)",
     keywords: "guard assert min out slippage receive",
     create: (id) => ({ id, type: "guardMinBalance", token: USDC, min: { kind: "fixed", value: "0" } }),
+  },
+  {
+    type: "guardAaveNoDebt",
+    title: "Check: no Aave debt",
+    group: "Guard",
+    hint: "Revert everything if any Aave debt is left in a token",
+    keywords: "guard assert aave debt",
+    create: (id) => ({ id, type: "guardAaveNoDebt", asset: USDC }),
+  },
+  {
+    type: "guardAaveHealth",
+    title: "Check: Aave health factor",
+    group: "Guard",
+    hint: "Revert everything if your Aave health factor ends below a minimum",
+    keywords: "guard assert aave health hf",
+    create: (id) => ({ id, type: "guardAaveHealth", min: "1.1" }),
   },
 ];
 
@@ -160,13 +208,14 @@ export function newId(): string {
   return `b${Date.now().toString(36)}${counter}`;
 }
 
-/** Tokens a swap block may use: stablecoins only, never Pendle assets (docs/SPEC.md §5.1). */
-export const SWAP_TOKENS: Address[] = [TOKENS.USDC.address, TOKENS.USDT.address];
+/** Tokens a swap block may use: USDC, USDT and reUSD only, never Pendle assets (docs/SPEC.md §5.1). */
+export const SWAP_TOKENS: Address[] = [TOKENS.USDC.address, TOKENS.USDT.address, TOKENS.reUSD.address];
 
 /** Tokens a pull block may use. */
 export const PULL_TOKENS: Address[] = [
   TOKENS.USDC.address,
   TOKENS.USDT.address,
   TOKENS.USD3.address,
+  TOKENS.reUSD.address,
   ...Object.values(SERIES).flatMap((s) => [s.pt, s.yt]),
 ];

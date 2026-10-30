@@ -6,10 +6,10 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { erc20Abi, executorAbi, morphoAbi } from "./abis";
+import { aaveErrorsAbi, aavePoolAbi, erc20Abi, executorAbi, morphoAbi } from "./abis";
 import type { Plan } from "./compiler/types";
 import { withChainLock } from "./chain";
-import { MORPHO, label, tokenInfo, type Market } from "./registry";
+import { AAVE_POOL, MORPHO, label, tokenInfo, type Market } from "./registry";
 
 export type BalanceChange = { token: Address; symbol: string; decimals: number; before: bigint; after: bigint };
 
@@ -21,12 +21,14 @@ export type SimulationResult =
       block: bigint;
       gasUsed: bigint;
       changes: BalanceChange[];
-      /** The plan's primary market (plan.market). */
-      collateralAfter: bigint;
-      borrowSharesAfter: bigint;
-      healthAfter: bigint;
+      /** The plan's primary market (plan.market); absent for a custom flow that touches no Morpho market. */
+      collateralAfter?: bigint;
+      borrowSharesAfter?: bigint;
+      healthAfter?: bigint;
       /** Every market in plan.markets. */
       positions: PositionAfter[];
+      /** The owner's Aave health factor after (WAD; max = no debt), when the plan touches Aave. */
+      aaveHealthAfter?: bigint;
       method: "eth_simulateV1" | "dev-fork";
     }
   | { ok: false; block: bigint; error: string; revertData?: Hex; method: "eth_simulateV1" | "dev-fork" };
@@ -59,9 +61,25 @@ export function decodeRevert(data: Hex | undefined, depth = 0): string {
         return `${e.errorName}(${a.map(String).join(", ")})`;
     }
   } catch {
-    // Morpho's flash loan re-throws the callback's revert data unchanged, so try once more as
-    // a nested blob, else give up with the selector.
-    return `revert ${data.slice(0, 10)}`;
+    return decodeAaveRevert(data) ?? `revert ${data.slice(0, 10)}`;
+  }
+}
+
+const AAVE_HINTS: Record<string, string> = {
+  ReserveFrozen: " (Aave governance has frozen this reserve: supply and borrow are disabled, repay and withdraw still work)",
+  InsufficientBorrowAllowance: " (the Executor can't borrow for you yet: Setup → Aave → allow it to borrow)",
+  ERC20InsufficientAllowance: " (the Executor can't pull your aToken yet: Setup → Aave → approve the aToken)",
+  UserHasAssetWithZeroLtv: " (Aave set an LTV of 0 on one of your collaterals: withdraw that asset or repay first)",
+};
+
+/** Aave v3 Pool / token custom errors, with a hint for the ones a plan can fix. */
+function decodeAaveRevert(data: Hex): string | undefined {
+  try {
+    const e = decodeErrorResult({ abi: aaveErrorsAbi, data });
+    const a = (e.args ?? []) as readonly unknown[];
+    return `Aave: ${e.errorName}${a.length ? `(${a.map(String).join(", ")})` : ""}${AAVE_HINTS[e.errorName] ?? ""}`;
+  } catch {
+    return undefined;
   }
 }
 
@@ -77,16 +95,22 @@ function readCalls(plan: Plan, tokens: Address[]): RawCall[] {
   return tokens.map((t) => ({ to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: "balanceOf", args: [plan.owner] }) }));
 }
 
+/** Templates report their own market; a custom flow reports exactly the markets its blocks use (maybe none). */
 function marketsFor(plan: Plan): Market[] {
-  return plan.markets?.length ? plan.markets : [plan.market];
+  return plan.markets ?? [plan.market];
 }
 
-/** Position + health reads for every market, two calls each. */
+/** Position + health reads for every market, two calls each, then the Aave account if used. */
 function stateCalls(plan: Plan): RawCall[] {
-  return marketsFor(plan).flatMap((m) => [
-    { to: MORPHO, data: encodeFunctionData({ abi: morphoAbi, functionName: "position", args: [m.id, plan.owner] }) },
-    { to: plan.executor, data: encodeFunctionData({ abi: executorAbi, functionName: "healthFactor", args: [m.id, plan.owner] }) },
-  ]);
+  return [
+    ...marketsFor(plan).flatMap((m) => [
+      { to: MORPHO, data: encodeFunctionData({ abi: morphoAbi, functionName: "position", args: [m.id, plan.owner] }) },
+      { to: plan.executor, data: encodeFunctionData({ abi: executorAbi, functionName: "healthFactor", args: [m.id, plan.owner] }) },
+    ]),
+    ...(plan.aave
+      ? [{ to: AAVE_POOL, data: encodeFunctionData({ abi: aavePoolAbi, functionName: "getUserAccountData", args: [plan.owner] }) }]
+      : []),
+  ];
 }
 
 function decodeState(plan: Plan, results: Hex[]) {
@@ -100,11 +124,15 @@ function decodeState(plan: Plan, results: Hex[]) {
     return { market, collateral, borrowShares, health };
   });
   const primary = positions.find((p) => p.market.id === plan.market.id) ?? positions[0];
+  const aave = plan.aave
+    ? decodeFunctionResult({ abi: aavePoolAbi, functionName: "getUserAccountData", data: results[2 * positions.length] })
+    : undefined;
   return {
     positions,
-    borrowSharesAfter: primary.borrowShares,
-    collateralAfter: primary.collateral,
-    healthAfter: primary.health,
+    borrowSharesAfter: primary?.borrowShares,
+    collateralAfter: primary?.collateral,
+    healthAfter: primary?.health,
+    aaveHealthAfter: aave?.[5],
   };
 }
 
@@ -199,5 +227,5 @@ export async function simulatePlan(client: PublicClient, plan: Plan, stateOverri
  * delivered less than the guard requires. A fresh quote with more headroom may fix it.
  */
 export function isSwapFailure(sim: SimulationResult): boolean {
-  return !sim.ok && /guard: USD[CT] balance|to (KyberSwap router|0x AllowanceHolder) failed/.test(sim.error);
+  return !sim.ok && /guard: (USDC|USDT|reUSD) balance|to (KyberSwap router|0x AllowanceHolder) failed/.test(sim.error);
 }

@@ -1,4 +1,5 @@
 import {
+  concatHex,
   encodeDeployData,
   encodeFunctionData,
   getAddress,
@@ -7,8 +8,20 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { erc20Abi, executorAbi, loadExecutorBytecode, morphoAbi, type ExecutorBytecode } from "./abis";
-import { MORPHO, TOKENS, SERIES } from "./registry";
+import {
+  aaveDebtTokenAbi,
+  DELEGATE,
+  DELEGATE_FACTORY,
+  DELEGATE_SALT,
+  delegateAbi,
+  erc20Abi,
+  executorAbi,
+  loadDelegateBytecode,
+  loadExecutorBytecode,
+  morphoAbi,
+  type ExecutorBytecode,
+} from "./abis";
+import { AAVE_POOL, AAVE_RESERVES, KYBER_ROUTER, MORPHO, SERIES, TOKENS, ZEROX_ALLOWANCE_HOLDER, label } from "./registry";
 
 // ---------------------------------------------------------------- local storage (per owner)
 
@@ -50,7 +63,7 @@ export function rememberExecutor(owner: Address, address: Address) {
 
 // ---------------------------------------------------------------- verification
 
-/** Runtime bytecode with immutable slots (owner, morpho) zeroed, for comparison. */
+/** Runtime bytecode with immutable slots (owner, morpho, aavePool) zeroed, for comparison. */
 function maskImmutables(code: Hex, refsByName: ExecutorBytecode["immutableReferences"]): string {
   const bytes = code.slice(2).split("");
   for (const refs of Object.values(refsByName)) {
@@ -65,9 +78,11 @@ export type Verification = { ok: true } | { ok: false; reason: string };
 
 /**
  * Checks that `address` runs exactly the compiled CovenantExecutorMainnet code (immutables
- * aside), is owned by `owner`, and points at Morpho Blue. Prevents using a look-alike contract.
+ * aside), is owned by `owner`, and points at Morpho Blue and the Aave v3 Pool. Prevents using a
+ * look-alike contract. `address == owner` means EIP-7702 mode: see {verifyDelegation}.
  */
 export async function verifyExecutor(client: PublicClient, address: Address, owner: Address): Promise<Verification> {
+  if (address.toLowerCase() === owner.toLowerCase()) return verifyDelegation(client, owner);
   const code = await client.getCode({ address });
   if (!code || code === "0x") return { ok: false, reason: "no contract at this address" };
   const compiled = await loadExecutorBytecode();
@@ -75,13 +90,76 @@ export async function verifyExecutor(client: PublicClient, address: Address, own
   if (maskImmutables(code, refs) !== maskImmutables(compiled.deployedBytecode, refs)) {
     return { ok: false, reason: "bytecode does not match CovenantExecutorMainnet (wrong contract or different build)" };
   }
-  const [o, m] = await Promise.all([
+  const [o, m, a] = await Promise.all([
     client.readContract({ address, abi: executorAbi, functionName: "owner" }) as Promise<Address>,
     client.readContract({ address, abi: executorAbi, functionName: "morpho" }) as Promise<Address>,
+    client.readContract({ address, abi: executorAbi, functionName: "aavePool" }) as Promise<Address>,
   ]);
   if (o.toLowerCase() !== owner.toLowerCase()) return { ok: false, reason: `owned by ${o}, not your account` };
   if (m.toLowerCase() !== MORPHO.toLowerCase()) return { ok: false, reason: "not pointed at Morpho Blue" };
+  if (a.toLowerCase() !== AAVE_POOL.toLowerCase()) return { ok: false, reason: "not pointed at the Aave v3 Pool" };
   return { ok: true };
+}
+
+// ---------------------------------------------------------------- EIP-7702 mode
+
+/** What the owner's EOA code says: nothing, a delegation to the Covenant delegate, or something else. */
+export type Delegation =
+  | { kind: "none" }
+  | { kind: "covenant"; configVersion: bigint; expected: bigint }
+  | { kind: "other"; delegate: Address };
+
+const DESIGNATOR = "0xef0100";
+
+export async function readDelegation(client: PublicClient, owner: Address): Promise<Delegation> {
+  const code = (await client.getCode({ address: owner }))?.toLowerCase();
+  if (!code || code === "0x") return { kind: "none" };
+  const delegate = code.startsWith(DESIGNATOR) && code.length === 48 ? getAddress(`0x${code.slice(8)}`) : undefined;
+  if (delegate !== DELEGATE) return { kind: "other", delegate: delegate ?? owner };
+  const [configVersion, expected] = await Promise.all([
+    client.readContract({ address: owner, abi: delegateAbi, functionName: "configVersion" }) as Promise<bigint>,
+    client.readContract({ address: DELEGATE, abi: delegateAbi, functionName: "CONFIG_VERSION" }) as Promise<bigint>,
+  ]);
+  return { kind: "covenant", configVersion, expected };
+}
+
+/**
+ * EIP-7702 mode: the owner's EOA is delegated to the Covenant delegate, the delegate runs exactly
+ * the compiled CovenantDelegateMainnet code (immutables = Morpho Blue and the Aave Pool), and its
+ * allowlist in the EOA's storage is the current version.
+ */
+export async function verifyDelegation(client: PublicClient, owner: Address): Promise<Verification> {
+  const d = await readDelegation(client, owner);
+  if (d.kind === "none") return { ok: false, reason: "your account is not delegated (EIP-7702)" };
+  if (d.kind === "other") return { ok: false, reason: `your account delegates to ${d.delegate}, not the Covenant delegate` };
+  const code = await client.getCode({ address: DELEGATE });
+  const compiled = await loadDelegateBytecode();
+  const refs = compiled.immutableReferences;
+  if (!code || maskImmutables(code, refs) !== maskImmutables(compiled.deployedBytecode, refs)) {
+    return { ok: false, reason: "the delegate's bytecode does not match CovenantDelegateMainnet" };
+  }
+  const [m, a] = await Promise.all([
+    client.readContract({ address: DELEGATE, abi: delegateAbi, functionName: "morpho" }) as Promise<Address>,
+    client.readContract({ address: DELEGATE, abi: delegateAbi, functionName: "aavePool" }) as Promise<Address>,
+  ]);
+  if (m.toLowerCase() !== MORPHO.toLowerCase() || a.toLowerCase() !== AAVE_POOL.toLowerCase()) {
+    return { ok: false, reason: "the delegate is not pointed at Morpho Blue and the Aave v3 Pool" };
+  }
+  if (d.configVersion !== d.expected) {
+    return { ok: false, reason: `allowlist version ${d.configVersion} in your account, ${d.expected} expected: update it in Setup` };
+  }
+  return { ok: true };
+}
+
+/** One-time, by anyone: deploy the shared delegate through the deterministic deployment proxy. */
+export async function deployDelegateTx(): Promise<{ to: Address; data: Hex }> {
+  const { bytecode } = await loadDelegateBytecode();
+  return { to: DELEGATE_FACTORY, data: concatHex([DELEGATE_SALT, bytecode]) };
+}
+
+/** Writes (or updates) the allowlist in your account: a transaction to your own address. */
+export function initializeTx(owner: Address): { to: Address; data: Hex } {
+  return { to: owner, data: encodeFunctionData({ abi: delegateAbi, functionName: "initialize" }) };
 }
 
 // ---------------------------------------------------------------- one-time setup (§9.1 Settings)
@@ -99,11 +177,19 @@ export async function deployData(owner: Address): Promise<Hex> {
   return encodeDeployData({ abi: executorAbi, bytecode, args: [owner] });
 }
 
-/** Approvals the plans need: YT for every unwind, USDC as entry equity. */
+/** Approvals the plans need: each series' YT for every unwind, its tokenOut as entry equity. */
 export const SETUP_APPROVALS: { token: Address; why: string }[] = [
-  { token: SERIES["PT-USD3-17DEC2026"].yt, why: "pulled from your wallet to redeem with your PT on every unwind" },
-  { token: TOKENS.USDC.address, why: "your equity when entering a loop (skip if you only unwind)" },
+  { token: SERIES["PT-USD3-17DEC2026"].yt, why: "pulled from your wallet to redeem with your PT on every PT-USD3 unwind" },
+  { token: TOKENS.USDC.address, why: "your equity when entering a PT-USD3 loop (skip if you only unwind)" },
+  { token: SERIES["PT-reUSD-10DEC2026"].yt, why: "pulled from your wallet to redeem with your PT on every PT-reUSD unwind (skip without PT-reUSD loops)" },
+  { token: TOKENS.reUSD.address, why: "your equity when entering a PT-reUSD loop (skip if you only unwind)" },
 ];
+
+/**
+ * Aggregator recipients for reUSD (PT-reUSD exits and entries). Executors deployed from this
+ * build allow them already; earlier ones need the owner to add them once.
+ */
+const REUSD_SWAP_RECIPIENTS = [ZEROX_ALLOWANCE_HOLDER, KYBER_ROUTER];
 
 export function setupSteps(executor: Address): SetupStep[] {
   return [
@@ -116,11 +202,47 @@ export function setupSteps(executor: Address): SetupStep[] {
     ...SETUP_APPROVALS.map(
       ({ token, why }): SetupStep => ({
         id: `approve-${token}`,
-        title: `Approve ${token === TOKENS.USDC.address ? "USDC" : "YT-USD3"} to the Executor — ${why}`,
+        title: `Approve ${label(token)} to the Executor — ${why}`,
         tx: { to: token, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [executor, maxUint256] }) },
         isDone: async (c, owner, ex) =>
           (await c.readContract({ address: token, abi: erc20Abi, functionName: "allowance", args: [owner, ex] })) > 0n,
       }),
     ),
+    ...REUSD_SWAP_RECIPIENTS.map(
+      (spender): SetupStep => ({
+        id: `recipient-reusd-${spender}`,
+        title: `Let your Executor approve reUSD to the ${label(spender)} (PT-reUSD swaps; Executors deployed before reUSD support only)`,
+        tx: { to: executor, data: encodeFunctionData({ abi: executorAbi, functionName: "setRecipient", args: [TOKENS.reUSD.address, spender, true] }) },
+        isDone: (c, _owner, ex) =>
+          c.readContract({ address: ex, abi: executorAbi, functionName: "allowedRecipient", args: [TOKENS.reUSD.address, spender] }) as Promise<boolean>,
+      }),
+    ),
   ];
+}
+
+/**
+ * Optional, only for the Aave blocks: credit delegation lets the Executor borrow for you (Aave
+ * sends the loan to the Executor, which hands it to you or uses it in the same plan); the aToken
+ * approval lets it pull your supply to withdraw it. Supplying and repaying need neither.
+ */
+export function aaveSetupSteps(executor: Address): SetupStep[] {
+  return AAVE_RESERVES.flatMap((r): SetupStep[] => [
+    {
+      id: `aave-delegate-${r.symbol}`,
+      title: `Allow the Executor to borrow ${r.symbol} on Aave for you (approveDelegation on ${r.debtToken.symbol}) — for the Aave “Borrow” block`,
+      tx: {
+        to: r.debtToken.address,
+        data: encodeFunctionData({ abi: aaveDebtTokenAbi, functionName: "approveDelegation", args: [executor, maxUint256] }),
+      },
+      isDone: async (c, owner, ex) =>
+        (await c.readContract({ address: r.debtToken.address, abi: aaveDebtTokenAbi, functionName: "borrowAllowance", args: [owner, ex] })) > 0n,
+    },
+    {
+      id: `aave-approve-${r.symbol}`,
+      title: `Approve ${r.aToken.symbol} to the Executor — for the Aave “Withdraw” block (your supply is pulled, then withdrawn)`,
+      tx: { to: r.aToken.address, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [executor, maxUint256] }) },
+      isDone: async (c, owner, ex) =>
+        (await c.readContract({ address: r.aToken.address, abi: erc20Abi, functionName: "allowance", args: [owner, ex] })) > 0n,
+    },
+  ]);
 }

@@ -1,12 +1,14 @@
 import type { Address, Hex } from "viem";
 import type { Market } from "../registry";
 
-/** Mirrors CovenantExecutor.Source. */
+/** Mirrors CovenantCore.Source. */
 export enum Source {
   BALANCE = 0,
   MORPHO_COLLATERAL = 1,
   MORPHO_BORROW_SHARES = 2,
   MORPHO_DEBT_ASSETS = 3,
+  /** What the plan itself holds of a token (the Executor's balance; under 7702, allotted + received). */
+  OWNED = 4,
 }
 
 /** Mirrors CovenantExecutor.Patch: overwrite the uint256 at `offset` in `data` at execution time. */
@@ -28,7 +30,7 @@ export type Swap = {
   data: Hex;
   amountIn: bigint;
   quotedOut: bigint;
-  /** Enforced on-chain by assertMinBalance on the executor. */
+  /** Enforced on-chain by the executor's balance guard. */
   minOut: bigint;
 };
 
@@ -40,6 +42,7 @@ export type Plan = {
   owner: Address;
   executor: Address;
   calls: Call[];
+  /** Tokens swept back to the owner (Executor) or tracked by the delegate (7702). */
   sweep: Address[];
   steps: Step[];
   planHash: Hex;
@@ -51,4 +54,6 @@ export type Plan = {
   markets?: Market[];
   /** Wallet tokens the simulation reports; defaults to the market's tokens. */
   tokens?: Address[];
+  /** The plan touches the owner's Aave account: simulation reports the Aave health factor after. */
+  aave?: boolean;
 };

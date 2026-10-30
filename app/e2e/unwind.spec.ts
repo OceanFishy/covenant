@@ -22,8 +22,11 @@ test("setup → unwind a real loop in one transaction → revoke", async ({ page
     await pending.first().click();
     await expect(pending).toHaveCount(left - 1);
   }
-  await expect(page.locator(".steps .pill.ok")).toHaveCount(3);
-  await expect(page.getByTestId("access-badge")).toHaveText("Executor access: ON (3)");
+  // Authorize, four approvals (YT + equity for each series), two reUSD aggregator recipients
+  // that a freshly deployed Executor already allows, and the four optional Aave steps (credit
+  // delegation + aToken approval for USDC and USDT).
+  await expect(page.locator(".steps .pill.ok")).toHaveCount(11);
+  await expect(page.getByTestId("access-badge")).toHaveText("Executor access: ON (9)");
   await page.screenshot({ path: `${shots}/2-setup-done.png`, fullPage: true });
 
   // Unwind: review shows simulated balance changes and the step list, then sign.
@@ -38,7 +41,7 @@ test("setup → unwind a real loop in one transaction → revoke", async ({ page
   await page.screenshot({ path: `${shots}/4-signed.png`, fullPage: true });
 
   await page.goto("/");
-  await expect(page.getByText("No open PT-USD3 positions")).toBeVisible();
+  await expect(page.getByText("No open PT loops")).toBeVisible();
 
   // Revoke everything, straight from the wallet.
   await page.goto("/#/revoke");

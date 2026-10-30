@@ -12,3 +12,6 @@ types/
 app/dist/
 app/test-results/
 app/playwright-report/
+
+# Ledger app build (ledger/build-app.sh)
+ledger/build/

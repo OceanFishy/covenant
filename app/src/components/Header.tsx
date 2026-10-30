@@ -15,10 +15,18 @@ export function AccessBadge() {
   );
   if (!owner) return null;
   const on = (data?.length ?? 0) > 0;
+  const d = app.delegation;
   return (
-    <a href="#/access" className={`badge ${on ? "on" : "off"}`} data-testid="access-badge">
-      Executor access: {data === undefined && app.executors.length ? "…" : on ? `ON (${data!.length})` : "OFF"}
-    </a>
+    <>
+      {d && d.kind !== "none" && (
+        <a href="#/access" className="badge on" data-testid="delegation-badge">
+          EIP-7702: {d.kind === "covenant" ? "Covenant" : "other contract"}
+        </a>
+      )}
+      <a href="#/access" className={`badge ${on ? "on" : "off"}`} data-testid="access-badge">
+        Executor access: {data === undefined && app.executors.length ? "…" : on ? `ON (${data!.length})` : "OFF"}
+      </a>
+    </>
   );
 }
 

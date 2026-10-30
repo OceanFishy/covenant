@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
-import { formatUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
 import { Card, Notice } from "../components/common";
 import { BlockEditor } from "../components/builder/BlockEditor";
 import { MAX_SIM_AGE_BLOCKS, PlanSteps, SignPanel } from "../components/PlanPanels";
@@ -8,21 +8,22 @@ import { usePoll } from "../hooks";
 import { CATALOG, def, newId, searchCatalog, type BlockDef, type Group } from "../lib/builder/catalog";
 import { compileFlow, validate } from "../lib/builder/compile";
 import { deleteFlow, flowFromParam, flowToHash, loadDraft, parseFlow, saveDraft, saveFlow, savedFlows } from "../lib/builder/storage";
-import { enterFlow, moveFlow, partialFlow, unwindFlow } from "../lib/builder/templates";
+import { enterFlow, exitFlow, maxUnwindFlow, moveFlow } from "../lib/builder/templates";
 import { findBlock, insertBlock, locate, moveBlock, removeBlock, updateBlock } from "../lib/builder/tree";
 import type { Block, Flow } from "../lib/builder/types";
 import { publicClient } from "../lib/chain";
+import { fmt } from "../lib/compiler/plans";
 import type { Plan, Swap } from "../lib/compiler/types";
-import { unwindMode } from "../lib/planner";
-import { readPositions, type PositionView } from "../lib/positions";
+import { capToReserve, unwindMode } from "../lib/planner";
+import { readPositions, tokenOutValue, type PositionView } from "../lib/positions";
 import { defaultQuoteConfig, HEADROOM_LADDER_BPS } from "../lib/quotes";
-import { MARKETS, TOKENS } from "../lib/registry";
+import { MARKETS, TOKENS, label, tokenInfo } from "../lib/registry";
 import { isSwapFailure, simulatePlan, type SimulationResult } from "../lib/simulate";
 import { useApp } from "../state";
 
 type Sim = { plan: Plan; sim: Extract<SimulationResult, { ok: true }>; swaps: Record<string, Swap> };
 
-const GROUPS: Group[] = ["Wallet", "Morpho", "Pendle", "Swap", "Guard"];
+const GROUPS: Group[] = ["Wallet", "Morpho", "Aave", "Pendle", "Swap", "Guard"];
 const EMPTY: Flow = { version: 1, name: "Untitled flow", blocks: [] };
 
 type DragData = { kind: "new"; type: Block["type"] } | { kind: "move"; id: string };
@@ -50,6 +51,8 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
   const [selected, setSelected] = useState<string | null>(null); // flash loan that receives new blocks
   const [query, setQuery] = useState("");
   const [sim, setSim] = useState<Sim>();
+  /** From the wallet prompt until a new simulation: pauses the per-block re-simulation. */
+  const [signing, setSigning] = useState(false);
   const [simError, setSimError] = useState<string>();
   const [simulating, setSimulating] = useState(false);
   const [block, setBlock] = useState<bigint>();
@@ -109,17 +112,41 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
   const [enterEquity, setEnterEquity] = useState("1000");
   const [enterLev, setEnterLev] = useState("3");
 
+  const [templateError, setTemplateError] = useState<string>();
+
   const useTemplate = (f: Flow) => {
     setFlow(f);
     setSelected(null);
     setSim(undefined);
     setSimError(undefined);
+    setTemplateError(undefined);
+    setNotice(undefined);
   };
-  const templateFor = (p: PositionView): Flow => {
-    const mode = unwindMode(p);
-    if (mode !== "partial") return unwindFlow(p);
-    const repay = (p.proceedsMatched * 9_900n) / 10_000n;
-    return partialFlow(p, repay, (Number(p.healthFactor / 10n ** 14n) / 10_000).toFixed(3));
+  /** Sized on click: 3Jane's reserve moves block to block, so it's read fresh here. */
+  const useMaxUnwind = async (p: PositionView) => {
+    try {
+      const capped = await capToReserve(publicClient, p);
+      useTemplate(maxUnwindFlow(capped));
+      const pt = p.market.series.pt;
+      setNotice(
+        capped.matched < p.matched
+          ? `Sized to 3Jane's USDC reserve: redeems ${fmt(capped.matched, pt)} for ~${fmt(capped.proceedsMatched, p.market.series.tokenOut)}, draining it.`
+          : `3Jane's USDC reserve covers all ${fmt(p.matched, pt)} your YT matches.`,
+      );
+    } catch (e) {
+      setTemplateError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  /** Equity is in the market's tokenOut; the flash loan is sized from its USDC value (reUSD at NAV). */
+  const enterM = MARKETS.find((m) => m.key === enterMarket)!;
+  const enterSeries = enterM.series;
+  const useEnter = async () => {
+    try {
+      const equity = parseUnits(enterEquity, tokenInfo(enterSeries.tokenOut).decimals);
+      useTemplate(enterFlow(enterM, equity, await tokenOutValue(publicClient, enterSeries, equity), Number(enterLev)));
+    } catch (e) {
+      setTemplateError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   // ------------------------------------------------------------ simulate (re-quote ladder) + re-sim every block
@@ -134,6 +161,7 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
         const r = await simulatePlan(publicClient, plan);
         if (r.ok) {
           setSim({ plan, sim: r, swaps: plan.swaps });
+          setSigning(false);
           return;
         }
         if (!isSwapFailure(r) || !Object.keys(plan.swaps).length) {
@@ -149,8 +177,9 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
     }
   }, [owner, executor, blocks, errors.length]);
 
+  // Re-simulate every block, except from the wallet prompt on: a signed plan can't run twice.
   useEffect(() => {
-    if (!sim) return;
+    if (!sim || signing) return;
     const t = setInterval(async () => {
       setBlock(await publicClient.getBlockNumber());
       const r = await simulatePlan(publicClient, sim.plan);
@@ -162,12 +191,12 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
       }
     }, 12_000);
     return () => clearInterval(t);
-  }, [sim, simulate]);
+  }, [sim, signing, simulate]);
 
   /** Adds "you receive at least 99.5% of the simulated amount" for each stablecoin you gain. */
   const addGuardsFromSim = () => {
     if (!sim) return;
-    const gains = sim.sim.changes.filter((c) => c.after > c.before && [TOKENS.USDC.address, TOKENS.USDT.address].includes(c.token));
+    const gains = sim.sim.changes.filter((c) => c.after > c.before && [TOKENS.USDC.address, TOKENS.USDT.address, TOKENS.reUSD.address].includes(c.token));
     setBlocks((list) => [
       ...list,
       ...gains.map(
@@ -307,6 +336,7 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
       <aside className="side">
         <Card title="Start from">
           {!owner && <p className="small muted">Connect Rabby to start from your positions.</p>}
+          {templateError && <Notice tone="danger">{templateError}</Notice>}
           {open.map((p) => {
             const other = MARKETS.find(
               (m) => m.key !== p.market.key && m.loanToken === p.market.loanToken && m.collateralToken === p.market.collateralToken,
@@ -315,9 +345,18 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
               <div key={p.market.key} className="template">
                 <b className="small">{p.market.label}</b>
                 <div className="row tight">
-                  <button onClick={() => useTemplate(templateFor(p))} data-testid={`template-unwind-${p.market.key}`}>
+                  <button onClick={() => useTemplate(exitFlow(p))} data-testid={`template-unwind-${p.market.key}`}>
                     {unwindMode(p) === "partial" ? "Partial unwind" : unwindMode(p) === "deleverage" ? "Deleverage" : "Unwind"}
                   </button>
+                  {p.market.series.viaUsd3 && (
+                    <button
+                      onClick={() => void useMaxUnwind(p)}
+                      title="Redeem as much PT as 3Jane's USDC reserve pays out right now (drains it if it's the limit)"
+                      data-testid={`template-max-${p.market.key}`}
+                    >
+                      Max unwind
+                    </button>
+                  )}
                   {other && (
                     <button onClick={() => useTemplate(moveFlow(p, other))} data-testid={`template-move-${p.market.key}`}>
                       Move → {other.label.split("·").pop()?.trim()}
@@ -338,14 +377,9 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
                 ))}
               </select>
               <input className="num" value={enterEquity} onChange={(e) => setEnterEquity(e.target.value)} aria-label="equity" />
-              <span className="small muted">USDC ×</span>
+              <span className="small muted">{label(enterSeries.tokenOut)} ×</span>
               <input className="num short" value={enterLev} onChange={(e) => setEnterLev(e.target.value)} aria-label="leverage" />
-              <button
-                onClick={() =>
-                  useTemplate(enterFlow(MARKETS.find((m) => m.key === enterMarket)!, BigInt(Math.round(Number(enterEquity) * 1e6)), Number(enterLev)))
-                }
-                disabled={!(Number(enterEquity) > 0 && Number(enterLev) > 1)}
-              >
+              <button onClick={() => void useEnter()} disabled={!(Number(enterEquity) > 0 && Number(enterLev) > 1)}>
                 Use
               </button>
             </div>
@@ -379,7 +413,7 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
             </>
           )}
         </Card>
-        {sim && <SignPanel plan={sim.plan} stale={stale} onDone={app.bump} />}
+        {sim && <SignPanel plan={sim.plan} stale={stale} onDone={app.bump} onSigning={setSigning} />}
       </aside>
     </div>
   );

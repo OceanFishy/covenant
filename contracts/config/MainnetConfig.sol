@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import {CovenantExecutor} from "../CovenantExecutor.sol";
+import {CovenantCore} from "../CovenantCore.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IMorpho} from "../interfaces/IMorpho.sol";
+import {IAavePool} from "../interfaces/IAave.sol";
 import {IPYieldToken, IStandardizedYield} from "../interfaces/IPendle.sol";
 
 /// @notice Ethereum mainnet addresses and the Executor allowlist built from them.
@@ -19,9 +20,19 @@ library MainnetConfig {
     // Morpho Blue
     address internal constant MORPHO = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
 
-    // DEX aggregators, used only for USDC <-> USDT (USDT-debt loops). Only USDC and USDT may be
-    // approved to them, so Pendle assets can never be routed through an aggregator. The swap's
-    // output is checked by an Executor guard (assertMinBalance), independent of the route data.
+    // Aave v3 Core market (Ethereum). Only USDC and USDT are approved to the Pool, so only they
+    // can be supplied or repaid; borrowing needs the owner's credit delegation on the debt token,
+    // and withdrawing needs the owner's aToken approval to the Executor (pulled, then withdrawn).
+    address internal constant AAVE_POOL = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
+    address internal constant A_USDC = 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c; // aEthUSDC
+    address internal constant A_USDT = 0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a; // aEthUSDT
+    address internal constant VDEBT_USDC = 0x72E95b8931767C79bA4EeE721354d6E99a61D004; // variableDebtEthUSDC
+    address internal constant VDEBT_USDT = 0x6df1C1E379bC5a00a7b4C6e67A203333772f45A8; // variableDebtEthUSDT
+
+    // DEX aggregators: USDC <-> USDT (USDT-debt loops) and reUSD <-> USDC (reUSD loops; Re's own
+    // mint/redeem is KYC-gated). Only USDC, USDT and reUSD may be approved to them, never Pendle
+    // assets (PT/YT/SY). The swap's output is checked by an Executor guard (assertMinBalance),
+    // independent of the route data.
     address internal constant ZEROX_ALLOWANCE_HOLDER = 0x0000000000001fF3684f28c67538d4D072C22734; // 0x Swap API v2
     address internal constant KYBER_ROUTER = 0x6131B5fae19EA4f9D964eAc0408E4408b66337b5; // MetaAggregationRouterV2
 
@@ -46,12 +57,12 @@ library MainnetConfig {
         return 1 << (i + 1);
     }
 
-    function rules() internal pure returns (CovenantExecutor.RuleInit[] memory r) {
+    function rules() internal pure returns (CovenantCore.RuleInit[] memory r) {
         uint256 ALLOWED = 1;
         uint256 RECIPIENT = 1 << 255;
         address[10] memory tokens = [USDC, USDT, USD3, REUSD, PT_USD3, YT_USD3, SY_USD3, PT_REUSD, YT_REUSD, SY_REUSD];
 
-        r = new CovenantExecutor.RuleInit[](6 + tokens.length * 3 + 4 * 2 + 3 + 2);
+        r = new CovenantCore.RuleInit[](6 + tokens.length * 3 + 4 * 2 + 3 + 2 + 4 + 2 * 2);
         uint256 n;
 
         // Morpho Blue. MarketParams is 5 static words (0..4), so arguments start at word 5.
@@ -93,38 +104,61 @@ library MainnetConfig {
         r[n++] = _r(ZEROX_ALLOWANCE_HOLDER, bytes4(keccak256("exec(address,address,uint256,address,bytes)")), ALLOWED);
         r[n++] = _r(KYBER_ROUTER, bytes4(0xe21fd0e9), ALLOWED);
 
+        // Aave v3 Pool. Funds always land in the Executor (borrow, withdraw to self/owner);
+        // onBehalfOf / to must be the owner or the Executor.
+        // supply(asset, amount, onBehalfOf, referralCode)
+        r[n++] = _r(AAVE_POOL, IAavePool.supply.selector, ALLOWED | w(2));
+        // withdraw(asset, amount, to): burns the Executor's own aTokens
+        r[n++] = _r(AAVE_POOL, IAavePool.withdraw.selector, ALLOWED | w(2));
+        // borrow(asset, amount, interestRateMode, referralCode, onBehalfOf)
+        r[n++] = _r(AAVE_POOL, IAavePool.borrow.selector, ALLOWED | w(4));
+        // repay(asset, amount, interestRateMode, onBehalfOf)
+        r[n++] = _r(AAVE_POOL, IAavePool.repay.selector, ALLOWED | w(3));
+        // aTokens: pull the owner's supply into the Executor to withdraw it, or hand it back.
+        // No recipient is allowlisted for them, so `transfer` can only go to the owner.
+        address[2] memory aTokens = [A_USDC, A_USDT];
+        for (uint256 i; i < aTokens.length; ++i) {
+            r[n++] = _r(aTokens[i], IERC20.transfer.selector, ALLOWED | RECIPIENT);
+            r[n++] = _r(aTokens[i], IERC20.transferFrom.selector, ALLOWED | w(0) | w(1));
+        }
+
         assert(n == r.length);
     }
 
-    function recipients() internal pure returns (CovenantExecutor.RecipientInit[] memory r) {
-        r = new CovenantExecutor.RecipientInit[](18);
+    function recipients() internal pure returns (CovenantCore.RecipientInit[] memory r) {
+        r = new CovenantCore.RecipientInit[](22);
         uint256 n;
-        r[n++] = CovenantExecutor.RecipientInit(USDC, MORPHO); // repay / flash repayment
-        r[n++] = CovenantExecutor.RecipientInit(USDT, MORPHO); // repay / flash repayment (USDT market)
-        r[n++] = CovenantExecutor.RecipientInit(USDC, ZEROX_ALLOWANCE_HOLDER); // USDC -> USDT
-        r[n++] = CovenantExecutor.RecipientInit(USDT, ZEROX_ALLOWANCE_HOLDER); // USDT -> USDC
-        r[n++] = CovenantExecutor.RecipientInit(USDC, KYBER_ROUTER);
-        r[n++] = CovenantExecutor.RecipientInit(USDT, KYBER_ROUTER);
-        r[n++] = CovenantExecutor.RecipientInit(USDC, SY_USD3); // SY.deposit(USDC)
-        r[n++] = CovenantExecutor.RecipientInit(USDC, USD3); // USD3.deposit
-        r[n++] = CovenantExecutor.RecipientInit(USD3, SY_USD3); // SY.deposit(USD3)
-        r[n++] = CovenantExecutor.RecipientInit(PT_USD3, MORPHO); // supplyCollateral
-        r[n++] = CovenantExecutor.RecipientInit(PT_USD3, YT_USD3); // redeemPY
-        r[n++] = CovenantExecutor.RecipientInit(YT_USD3, YT_USD3); // redeemPY
-        r[n++] = CovenantExecutor.RecipientInit(SY_USD3, YT_USD3); // mintPY
-        r[n++] = CovenantExecutor.RecipientInit(REUSD, SY_REUSD); // SY.deposit(reUSD)
-        r[n++] = CovenantExecutor.RecipientInit(PT_REUSD, MORPHO);
-        r[n++] = CovenantExecutor.RecipientInit(PT_REUSD, YT_REUSD);
-        r[n++] = CovenantExecutor.RecipientInit(YT_REUSD, YT_REUSD);
-        r[n++] = CovenantExecutor.RecipientInit(SY_REUSD, YT_REUSD);
+        r[n++] = CovenantCore.RecipientInit(USDC, MORPHO); // repay / flash repayment
+        r[n++] = CovenantCore.RecipientInit(USDT, MORPHO); // repay / flash repayment (USDT market)
+        r[n++] = CovenantCore.RecipientInit(USDC, AAVE_POOL); // Aave supply / repay
+        r[n++] = CovenantCore.RecipientInit(USDT, AAVE_POOL); // Aave supply / repay
+        r[n++] = CovenantCore.RecipientInit(USDC, ZEROX_ALLOWANCE_HOLDER); // USDC -> USDT
+        r[n++] = CovenantCore.RecipientInit(USDT, ZEROX_ALLOWANCE_HOLDER); // USDT -> USDC
+        r[n++] = CovenantCore.RecipientInit(USDC, KYBER_ROUTER);
+        r[n++] = CovenantCore.RecipientInit(USDT, KYBER_ROUTER);
+        // reUSD -> USDC exits, USDC -> reUSD entries
+        r[n++] = CovenantCore.RecipientInit(REUSD, ZEROX_ALLOWANCE_HOLDER);
+        r[n++] = CovenantCore.RecipientInit(REUSD, KYBER_ROUTER);
+        r[n++] = CovenantCore.RecipientInit(USDC, SY_USD3); // SY.deposit(USDC)
+        r[n++] = CovenantCore.RecipientInit(USDC, USD3); // USD3.deposit
+        r[n++] = CovenantCore.RecipientInit(USD3, SY_USD3); // SY.deposit(USD3)
+        r[n++] = CovenantCore.RecipientInit(PT_USD3, MORPHO); // supplyCollateral
+        r[n++] = CovenantCore.RecipientInit(PT_USD3, YT_USD3); // redeemPY
+        r[n++] = CovenantCore.RecipientInit(YT_USD3, YT_USD3); // redeemPY
+        r[n++] = CovenantCore.RecipientInit(SY_USD3, YT_USD3); // mintPY
+        r[n++] = CovenantCore.RecipientInit(REUSD, SY_REUSD); // SY.deposit(reUSD)
+        r[n++] = CovenantCore.RecipientInit(PT_REUSD, MORPHO);
+        r[n++] = CovenantCore.RecipientInit(PT_REUSD, YT_REUSD);
+        r[n++] = CovenantCore.RecipientInit(YT_REUSD, YT_REUSD);
+        r[n++] = CovenantCore.RecipientInit(SY_REUSD, YT_REUSD);
         assert(n == r.length);
     }
 
     function _r(address target, bytes4 selector, uint256 rule)
         private
         pure
-        returns (CovenantExecutor.RuleInit memory)
+        returns (CovenantCore.RuleInit memory)
     {
-        return CovenantExecutor.RuleInit(target, selector, rule);
+        return CovenantCore.RuleInit(target, selector, rule);
     }
 }

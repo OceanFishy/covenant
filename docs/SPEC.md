@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** v0.8 (M0 done; M1 and M2 built; awaiting a real-Ledger mainnet run) · **Owner:** fish · **Date:** 2026-10-30
+**Status:** v1.0 (M0 done; M1 and M2 built; PT-reUSD loops and EIP-7702 mode built (M3/M4 parts); awaiting a real-Ledger mainnet run) · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -28,8 +28,9 @@ PT-reUSD (Re Protocol), with USDC borrowed on Morpho Blue.
 - Automation or keepers (bots that unwind on a trigger).
 - Multi-chain. v1 is Ethereum mainnet only. The registry is chain-keyed so other
   chains can be added later.
-- Supporting every protocol. v1 covers Morpho Blue, Pendle V2, 3Jane, Re Protocol
-  and generic ERC-20/ERC-4626 and DEX-aggregator blocks.
+- Supporting every protocol. v1 covers Morpho Blue, Aave v3 Core (USDC/USDT),
+  Pendle V2, 3Jane, Re Protocol and generic ERC-20/ERC-4626 and DEX-aggregator
+  blocks.
 - A public product. v1 is a personal tool. Hardening for strangers comes later.
 
 ---
@@ -68,7 +69,7 @@ you exposed to price moves and liquidation risk.
 | **Personal Executor (owner = EOA)** | Yes | Yes | Blind-sign (mitigated, §8) | **Chosen for v1** |
 | Morpho Bundler3 + adapters | Yes | Partly | Blind-sign | Good reference design, but Morpho-centric; reuse its adapter ideas |
 | Safe{Wallet} + MultiSend, Ledger as signer | Yes | No (static amounts) | Safe UI | Amounts are fixed at signing, so redemptions with variable output break it |
-| EIP-7702 (EOA delegates to Executor code) | Yes | Yes | Ledger limits 7702 to vetted contracts | **v2 path.** Same Executor code, so it's a drop-in later |
+| EIP-7702 (EOA delegates to Executor code) | Yes | Yes | Ledger limits 7702 to vetted contracts | **Built as an option (§5.4):** the same engine as the Executor; a sideloaded Ledger app whitelists the delegate for the one-time authorization |
 | Weiroll VM | Yes | Yes | Blind-sign | Powerful but harder to audit and decode; overkill for v1 |
 
 ---
@@ -131,9 +132,9 @@ you exposed to price moves and liquidation risk.
 |---|---|
 | **Block** | One typed step (`app/src/lib/builder/types.ts`) that compiles to one or more Executor `Call`s, with approvals added automatically. |
 | **Flow** | An ordered list of blocks. A flash loan is a container whose children run inside the loan. It's serializable JSON, so it can be saved, exported or shared. |
-| **Amount** | `fixed` (a decimal in the block's token), `balance` (the Executor's balance at execution), `debt` (a market's live debt + bps), `collateral` (all collateral), or `allShares` (repay all by shares). Everything except `fixed` is resolved **on-chain at execution time** through the Executor's patch sources. |
-| **Guard** | A block that reverts the whole transaction if it fails: minimum received, no debt, minimum health factor. Swaps add their own output guard. |
-| **Template** | A flow generated from your position: unwind, deleverage, partial, enter, or move between markets. |
+| **Amount** | `fixed` (a decimal in the block's token), `balance` (the Executor's balance at execution), `debt` (a market's live debt + bps), `collateral` (all collateral), `allShares` (repay all by shares), `aaveDebt` (your live Aave variable debt in a token + bps), `allDebt` (Aave repay: exactly your live debt) or `supplied` (Aave withdraw: all your aTokens). Everything except `fixed` is resolved **on-chain at execution time** through the Executor's patch sources (Aave amounts are aToken / variable debt token balances, read with `BALANCE`). |
+| **Guard** | A block that reverts the whole transaction if it fails: minimum received, no debt, minimum health factor (Morpho market or Aave account), no Aave debt in a token. Swaps add their own output guard. |
+| **Template** | A flow generated from your position: unwind, deleverage, partial, max unwind, enter, or move between markets. |
 
 ### Flow JSON (as implemented)
 
@@ -188,8 +189,10 @@ function onMorphoFlashLoan(uint256 assets, bytes calldata data) external; // dat
 
 // Guards, callable from plans, revert on failure
 function assertMinBalance(address token, address account, uint256 min) external view;
+function assertMaxBalance(address token, address account, uint256 max) external view; // e.g. no Aave debt: (variableDebtToken, owner, 0)
 function assertNoDebt(bytes32 id, address user) external view;
 function assertMinHealth(bytes32 id, address user, uint256 minHealthWad) external view;
+function assertMinAaveHealth(address user, uint256 minHealthWad) external view; // Pool.getUserAccountData
 ```
 
 **Allowlist encoding:** one `uint256` rule per (target, selector).
@@ -201,7 +204,11 @@ function assertMinHealth(bytes32 id, address user, uint256 minHealthWad) externa
 
 The mainnet rules live in
 [`contracts/config/MainnetConfig.sol`](../contracts/config/MainnetConfig.sol) and
-are passed to the constructor, so deploying is a single transaction.
+are passed to the constructor, so deploying is a single transaction. The
+constructor also takes the Morpho Blue and Aave v3 Pool addresses (immutables the
+app checks when it verifies an Executor). Executors deployed before Aave support
+have different bytecode, fail verification, and must be replaced (deploy a new
+one, revoke the old one in Access).
 
 **Rules:**
 - `onlyOwner` on `execute`. The owner is the Ledger EOA, fixed at deployment.
@@ -228,6 +235,8 @@ are passed to the constructor, so deploying is a single transaction.
   - **Aggregator swaps:** the compiler rejects any swap whose input or output is
     a Pendle asset. Because of the recipient check, the Executor can't hand a
     PT or YT to an aggregator anyway.
+  - **Aave:** only USDC and USDT can be approved to the Aave Pool, so Pendle
+    assets never reach it (§6.6).
 - **Ends empty:** `execute` sends the full balance of every `sweep` token to the
   owner at the end. The compiler always lists every token the plan touches, and
   the fork tests assert that the Executor ends with a zero balance.
@@ -270,6 +279,65 @@ contracts, which keeps the audit surface small. Adapters are only added where a
 protocol needs something special (for example a callback, or a two-step
 redemption).
 
+### 5.4 EIP-7702 mode (built, optional)
+
+Your EOA delegates (EIP-7702) to one shared deployment of
+[`CovenantDelegateMainnet`](../contracts/CovenantDelegateMainnet.sol) and runs
+plans itself: a plan is a transaction to your own address calling `execute`. No
+Executor, token approvals, Morpho authorization or Aave credit delegation, and
+protocols see your address as the caller (e.g. Re's KYC check is on
+`msg.sender`). The engine is shared with the Executor
+([`CovenantCore`](../contracts/CovenantCore.sol)): same calls, patches, flash
+loan, guards and allowlist rules.
+
+Code at a delegated EOA runs in its context and anyone can call it, so the
+delegate adds:
+- **Self-only:** `execute`, `initialize`, `setRule`/`setRecipient` and `allot`
+  require `msg.sender == address(this)`; Morpho's flash callback is accepted
+  only while a plan runs. The shared implementation can't be driven directly.
+- **Allowlist in your storage** under the ERC-7201 namespace
+  `covenant.delegate.v1`, written by `initialize()` (in the same type-4
+  transaction as the delegation) and versioned (`configVersion` vs
+  `CONFIG_VERSION`; Setup offers an update when they differ).
+- **A plan only spends what it allots.** `execute(calls, tracked, hash)`
+  snapshots your balance of every tracked token (all plan tokens plus Aave
+  aTokens); `allot(token, amount)` replaces the Executor's pulls;
+  `Source.OWNED` / `assertMinOwned` see allotted plus received funds only; at the
+  end every tracked balance must be ≥ snapshot − allotted, or everything
+  reverts (`Overspent`).
+- **No lingering allowances:** each (token, spender) a plan approves (and the
+  flash repayment) is put back to its previous value at the end; an existing
+  allowance is cleared first, so USDT-style tokens work.
+- **Still a wallet:** accepts ETH and ERC-721/1155 safe transfers, and answers
+  ERC-1271 for signatures made by your own key (low-s, 65 bytes).
+
+**Deployment and signing.** The delegate is deployed once, by anyone, through
+the deterministic deployment proxy (`0x4e59…956C`, salt 0), so its address
+follows from the bytecode (no metadata hash: comments don't move it; code
+changes do, and need a new authorization). Ledger's Ethereum app only signs 7702
+authorizations for whitelisted delegates (at 1.23.0: just Simple7702Account), so:
+1. Setup → **Deploy** the delegate (if nobody has).
+2. [`ledger/build-app.sh --load`](../ledger/build-app.sh): app-ethereum 1.23.0
+   with the delegate added to the whitelist (chain id 1 only), built in Ledger's
+   Docker builder and sideloaded to a **Nano S Plus** as "Covenant 7702" (Nano X
+   can't sideload; the device warns it isn't genuine). The official app stays.
+3. In that app, enable *EIP-7702* and *Blind signing*; close Rabby / Ledger Live.
+4. [`app/scripts/ledger7702.mjs delegate`](../app/scripts/ledger7702.mjs):
+   signs the authorization (APDU `0x34`, nonce = tx nonce + 1) and one type-4
+   transaction to yourself calling `initialize()`, verifies both signatures by
+   recovery, broadcasts, then checks the designator and `configVersion`. Use a
+   private RPC (`--rpc https://rpc.flashbots.net`): if someone else included the
+   authorization first, the account ends up delegated but not initialized, and
+   Setup's "update the allowlist" step finishes it.
+5. Remove the sideloaded app. Plans, allowlist updates and `ledger7702.mjs
+   revoke` (authorization to address 0) work with the official app.
+
+**Risk:** your whole account runs this code, so a bug can reach all your funds,
+not just approved tokens, until you revoke. Fork tests: a real 597k PT / 447k
+USDC position unwound from the delegated EOA for 149.7k USDC; a 3× entry and
+exit kept 5k USDC of unrelated savings untouched; a plan repaying from
+unallotted savings reverts.
+
 ---
 
 ## 6. Block catalog (v1)
@@ -285,7 +353,7 @@ simulation preview.
 | `wallet.sweep` | Send all balances of listed tokens back to the EOA | Always added automatically as the final block |
 | `erc20.approve` | Exact-amount approval from the Executor | Inserted automatically by the compiler before blocks that need it |
 | `erc4626.deposit` / `redeem` | Generic vault in/out | Covers many yield tokens. Uses `previewRedeem` for minOut |
-| `swap.aggregator` | Swap stablecoins (USDC ↔ USDT) via **0x** (default; Swap API v2, AllowanceHolder) or **KyberSwap** (keyless fallback) | Route quoted at build time for a **fixed sell amount**, with the Executor as taker and recipient, and re-quoted if stale. The Executor checks the output with `assertMinBalance` whatever the route data says. Only USDC/USDT can be approved to an aggregator, so **Pendle assets can never be routed** (§5.1) |
+| `swap.aggregator` | Swap USDC ↔ USDT or USDC ↔ reUSD via **0x** (default; Swap API v2, AllowanceHolder) or **KyberSwap** (keyless fallback) | Route quoted at build time for a **fixed sell amount**, with the Executor as taker and recipient, and re-quoted if stale. The Executor checks the output with `assertMinBalance` whatever the route data says. Only USDC, USDT and reUSD can be approved to an aggregator, so **Pendle assets can never be routed** (§5.1) |
 | `guard.minBalance` | Revert if the Executor's balance of a token < min | |
 | `guard.healthFactor` | Revert if a Morpho position's HF < target after the step | Reads the oracle and LLTV on-chain |
 | `guard.maxDebt` / `guard.zeroDebt` | Assert debt bounds | Used by unwind templates |
@@ -369,21 +437,92 @@ USD3 you already hold (`SY.deposit(USD3)`) isn't capped.
 (a) a partial unwind sized to the available liquidity, or (b) swapping the
 remaining **USD3** (not PT) to USDC via an aggregator, with `minOut`.
 
+**Max unwind (built; Positions → Review, and a Builder template):** redeems the most PT that can be
+redeemed right now: the PT your YT covers, capped by what 3Jane pays SY-USD3
+out of its reserve, `USD3.maxRedeem(SY)` × Pendle's current index
+(`max(pyIndexStored, SY.exchangeRate())`). That PT never asks for more than
+`maxRedeem`, and a couple of PT units more would, so when the reserve is the smaller
+limit the flow **drains it** (to a few wei). With the capped amount, the flow takes
+the usual shape: a deleverage if the proceeds repay the whole debt, otherwise a
+partial unwind that repays 99% of them. The reserve is read when the Review
+screen (or the Builder template) is built, and both re-simulate every block, so a
+reserve that shrank shows up as a failed simulation before signing. Fork test: reserve cut to ~500k USDC under a
+1.26M PT position; the max unwind redeemed 502.7k PT and left the reserve at
+dust.
+
 ### 6.5 Re Protocol (reUSD / reUSDe)
 
-| Block | Does | Notes |
+**Answered (2026-10-29):** minting and redeeming with Re is **KYC-gated** (the
+Insurance Capital Layer takes KYC-approved deposits; redemptions go through
+Re's RedemptionGateway), and instant redemptions currently pay **sUSDe** from a
+~$9M vault before falling back to a quarterly queue. A per-user Executor can't
+use either, so there are no `re.mint` / `re.redeem` blocks. PT-reUSD loops
+convert with `swap.aggregator` instead, **reUSD only, never PT-reUSD**:
+
+| Step | How |
+|---|---|
+| Exit | `pendle.redeemSY` → reUSD (SY-reUSD only pays reUSD), then sell just enough reUSD for the USDC debt + 0.10% (guard: debt + 0.02%, same re-quote ladder as USDT, §7.1). **The rest comes back as reUSD**, so only the debt portion pays DEX costs |
+| Enter | equity in reUSD; flash USDC = equity at Re's NAV (`SY.exchangeRate`) × (L − 1), swapped exact-in to reUSD (min out = quote − 0.3%), then `SY.deposit(reUSD)` → `mintPY` |
+| Matched / partial unwind | valued in USDC at Re's NAV less 1% for the sale (§6.3 decisions compare this against the USDC debt) |
+
+**Measured (2026-10-29):** reUSD NAV ≈ 1.1103 USDC (`SY-reUSD.exchangeRate`).
+KyberSwap: 1M reUSD → 1.106M USDC (−0.36% vs NAV), 5M → 5.527M (−0.45%);
+1M USDC → 903k reUSD. PT-reUSD and YT-reUSD have 6 decimals (SY asset USDC),
+SY-reUSD and reUSD 18. SY-reUSD deposits are uncapped and wrap reUSD 1:1. Fork
+tests: a real 3.02M PT / 2.69M USDC position closed for 285.1k reUSD (316.6k
+USDC at NAV) plus 2.8k USDC; a 531k PT / 456k USDC one for 66.2k reUSD (73.5k
+at NAV) plus 0.7k USDC; a 10k-reUSD 3× entry then exit lost 0.04–0.08% at NAV.
+
+**Known limitation (2026-10-30):** KyberSwap's route for ~2.4M+ reUSD → USDC
+passes through a Uniswap v4 hook pool that reverts on mainnet itself
+(`Call failed`; routes for 0.1–1M execute, and the same 2.43M route without
+`uniswap-v4` executes for $27 less). The pre-sign simulation catches it and the
+re-quote ladder returns the same route, so such exits stop at "aggregator
+route kept failing" (nothing is sent). Workarounds: set `ZEROX_API_KEY` (0x
+routes), or exit in parts with fixed amounts from the Builder.
+
+Executors deployed before reUSD support lack the two reUSD aggregator
+recipients; Setup shows them as one-time `setRecipient` transactions.
+
+**DEX vs. official redemption (shown under every reUSD sale on Review and in
+the Builder):** the swap's cost against Re's NAV (Re's own redemption price
+router), quoted and at the guard's worst case, next to Re's live
+`InstantRedemption.feeBps` on the same reUSD (6 bps on 2026-10-30), and the
+difference. It also states whether official redemption is open, its payout
+token, and its per-call cap, read live from the RedemptionGateway
+(`0x8aEb…E31e`, in `registry.re`; read-only, not allowlisted). Example on
+2026-10-30: 412.5k reUSD → 456.5k USDC quoted, 0.34% ($1,548) under NAV vs a
+$275 official fee, +$1,273.
+
+> **Risk note (shown on Review and Enter for PT-reUSD):** reUSD/reUSDe carry
+> reinsurance underwriting risk. A payout event can produce negative yield,
+> which matters for a leveraged loop near its LLTV.
+
+### 6.6 Aave v3 Core (USDC / USDT)
+
+| Block | Calls | Notes |
 |---|---|---|
-| `re.mint` | Approved stablecoin → reUSD | Through Re's Insurance Capital Layer contracts. **Verify whether minting is permissioned or KYC-gated for your address** |
-| `re.redeem` | reUSD → stablecoin | **Verify whether redemption is instant or queued.** If queued, it can't be used atomically. Use `swap.aggregator` / a Curve pool for **reUSD** (never PT-reUSD) instead |
-| `re.junior*` | reUSDe in/out | Junior tranche with underwriting (insurance-loss) risk. Not used in v1 templates |
+| `aave.supply` | `approve(Pool)` → `Pool.supply(asset, amount, owner, 0)` | Supplies from the Executor **for you** (`onBehalfOf` pinned to the owner/Executor). `all` = the Executor's balance |
+| `aave.withdraw` | `aToken.transferFrom(owner, executor, amount)` → `Pool.withdraw(asset, max, executor)` | Aave only withdraws `msg.sender`'s aTokens, so your supply is pulled first. `all` = your live aToken balance. Needs the one-time aToken approval |
+| `aave.borrow` | `Pool.borrow(asset, amount, 2, 0, owner)` | Variable rate, debt on your account, funds to the Executor (then swept to you or used in the plan). Needs credit delegation (`approveDelegation` on the variable debt token) |
+| `aave.repay` | `approve(Pool)` → `Pool.repay(asset, amount, 2, owner)` | `all` patches the amount to your **live variable debt token balance**: Aave rejects `type(uint256).max` on behalf of someone else, and the balance is exact at execution. `balance` repays up to the Executor's balance (Aave caps at the debt; the rest is swept back) |
+| `guard.aaveHealth` | `assertMinAaveHealth(owner, min)` | Whole Aave account (`getUserAccountData`) |
+| `guard.aaveNoDebt` | `assertMaxBalance(variableDebtToken, owner, 0)` | |
 
-PT-reUSD loops on Morpho use the same templates as PT-USD3, with the conversion
-step swapped (`re.redeem` or `swap.aggregator` instead of
-`threejane.redeemUSD3`).
+A Morpho flash loan or a swap's minimum output can be sized to `aaveDebt`, so an
+Aave position closes in one transaction: flash-borrow the debt from Morpho,
+repay all, pull and withdraw all aTokens, Morpho takes its loan back.
 
-> **Risk note to surface in the UI:** reUSD/reUSDe carry reinsurance
-> underwriting risk. A payout event can produce negative yield, which matters
-> for a leveraged loop near its LLTV.
+**Allowlist:** `Pool.supply` (word 2 pinned), `withdraw` (word 2), `borrow`
+(word 4), `repay` (word 3); aEthUSDC/aEthUSDT `transferFrom` (owner ↔ Executor)
+and `transfer` (owner only). Debt tokens have **no** rule: a plan can never
+re-delegate your credit. USDC and USDT are the only tokens approvable to the Pool.
+
+**Status (2026-10-29):** Aave governance has frozen every v3 Ethereum reserve
+with LTV 0 (Core and Prime). Repay and withdraw work; supply and borrow revert
+with `ReserveFrozen` until Aave unfreezes. The Positions page reads the freeze
+flag live, and the simulation explains Aave reverts (frozen reserve, missing
+delegation or aToken approval).
 
 ---
 
@@ -398,7 +537,7 @@ left at a worse health factor midway. The partial and YT-shortfall unwinds
 (§6.3, §7.3) and USDT-debt loops use the same flash structure.
 
 Parameters: `market` (PT-USD3/USDC A or B, PT-USD3/USDT, PT-reUSD/USDC), `yt`
-amount, `minOut`, and the swap route for USDT markets.
+amount, `minOut`, and the swap route for USDT and PT-reUSD markets.
 
 ```
 morpho.accrueInterest(market)
@@ -537,10 +676,11 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
 1. **Positions:** auto-detected Morpho positions for the EOA and the Executor:
    collateral, debt, HF, LTV/LLTV, PT maturity, YT balance, the underlying's
    redeemable liquidity. Each row has one-click actions: **Unwind**, **Partial**,
-   **Re-lever**, **Roll**.
+   **Re-lever**, **Roll**. Below them, your Aave v3 USDC/USDT supply and debt,
+   the Aave health factor, and which reserves Aave has frozen.
 2. **Builder** (`#/builder`, built in M2):
-   - **Left: the block palette.** 14 blocks grouped as Wallet, Morpho, Pendle,
-     Swap and Guard.
+   - **Left: the block palette.** 20 blocks grouped as Wallet, Morpho, Aave,
+     Pendle, Swap and Guard.
      - **Search:** `/` focuses search, and Enter adds the top match. Title
        matches rank first, so "redeem sy" adds *Redeem SY*.
      - **Adding:** click a block to append it, or drag it to an exact spot.
@@ -573,6 +713,8 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
    - **One-time setup wizard:** deploy the Executor, call
      `setAuthorization(executor, true)` on Morpho, and approve the loop tokens
      to the Executor. That's roughly 3–6 Ledger transactions, done once.
+     Optional Aave steps: credit delegation (for the Aave Borrow block) and
+     aEthUSDC/aEthUSDT approvals (for Withdraw), one per reserve.
    - **Revoke:** see §9.3. It's also on every screen, not just in Settings.
 
 ### 9.3 Executor access and revoke (always visible)
@@ -584,14 +726,17 @@ in one click.
   every block:
   - `Morpho.isAuthorized(you, executor)`.
   - `allowance(you, executor)` for every loop token (USDC, USD3, reUSD, PT and YT
-    for each market).
+    for each market), and for aEthUSDC / aEthUSDT.
+  - Aave credit delegation: `borrowAllowance(you, executor)` on each variable
+    debt token.
   - It shows **"Executor access: ON"** (amber) with a count, or **"OFF"** (grey).
   - Clicking it opens the Access panel.
 - **Access panel:**
   - A list of each permission with its current value (authorized yes/no, the
     allowance amount or "unlimited") and its own **Revoke** button.
   - **Revoke all:** a big red button. It queues
-    `Morpho.setAuthorization(executor, false)` plus `approve(executor, 0)` for
+    `Morpho.setAuthorization(executor, false)`, `approveDelegation(executor, 0)`
+    on each Aave debt token with a delegation, plus `approve(executor, 0)` for
     each non-zero allowance, then walks through the Ledger prompts one by one
     with a checklist. Each row turns green once it's mined and the badge
     re-reads the chain.
@@ -610,6 +755,8 @@ in one click.
   - Morpho authorization: `0xBBBB…FFCb` → `setAuthorization(<executor>, false)`.
     Rabby's own Approvals page and revoke.cash list ERC-20 approvals, but **not**
     the Morpho authorization.
+  - Aave credit delegation: each variable debt token →
+    `approveDelegation(<executor>, 0)`. Not listed by Rabby or revoke.cash either.
   - Token approvals: also listed in Rabby's Approvals page.
 - **After revoking,** templates show "Executor access is off" and offer
   **Re-enable** (the setup wizard's authorize and approve steps).
@@ -663,7 +810,11 @@ reviewed manually. **No address is trusted from an API.**
   - For Pendle: `YT.PT()`, `YT.SY()`, `expiry()` and SY `getTokensIn`/`getTokensOut`.
   - For Morpho: market parameters via `idToMarketParams`.
 - **Contents:** USDC, USDT, USD3, reUSD; Morpho Blue; PT-USD3-17DEC2026 and
-  PT-reUSD-10DEC2026 (PT, YT, SY); and their Morpho markets. **All are supported:**
+  PT-reUSD-10DEC2026 (PT, YT, SY); their Morpho markets; the Aave v3 Core Pool
+  with the USDC and USDT aTokens and variable debt tokens (checked with
+  `PoolAddressesProvider.getPool`, `Pool.getReserveAToken` /
+  `getReserveVariableDebtToken` and each token's `UNDERLYING_ASSET_ADDRESS`).
+  **All are supported:**
   - PT-USD3/USDC **A** (`0xf8c5…`) and **B** (`0xecab…`): both 86% LLTV, with
     different oracles.
   - PT-USD3/**USDT** (`0x37a5…`): 91.5% LLTV.
@@ -693,6 +844,7 @@ truth during simulation.
 | Someone else calls the Executor | `onlyOwner`. Callbacks are gated by sender **and** a transient "executing" flag |
 | Malicious callback re-enters mid-plan | Transient reentrancy lock. Callbacks only run inner calls passed in by `execute` |
 | The standing Morpho authorization gets abused | Only the Executor holds it, and only the owner can drive the Executor. Callbacks are gated (§5.1). There's a one-click Revoke. The Executor is immutable, so new versions mean revoke-then-reauthorize |
+| The standing Aave credit delegation / aToken approval gets abused | Same as Morpho: only the owner drives the Executor; borrow `onBehalfOf` and withdraw `to` are pinned to the owner/Executor, debt tokens have no allowlist rule (no re-delegation), aTokens can only go back to the owner; optional, per reserve, revocable in Access |
 | Funds left in the Executor | Final sweep plus an "ends empty" invariant |
 | Leftover approvals | Exact amounts, reset at the end. Permit2 with short expiry |
 | Bad quote or sandwich | On-chain `minOut` per swap or redeem. Private RPC. Simulation at the latest block |
@@ -715,7 +867,9 @@ loan always repaid), then an external review before moving significant size.
 - **Unit tests** (`test/CovenantExecutor.t.sol`, no fork): owner-only access,
   flash-callback gating, Pendle router rejected, PT/YT recipients restricted,
   `transferFrom` limited to the owner, Morpho receivers and `onBehalf` pinned,
-  `setAuthorization` blocked from plans, patch bounds checked.
+  `setAuthorization` blocked from plans, patch bounds checked, Aave
+  `onBehalfOf`/`to` pinned, aTokens only back to the owner, no credit
+  re-delegation, only USDC/USDT approvable to the Pool.
 - **Fork tests** (latest mainnet block, real positions impersonated):
   - `test/fork/PtUsd3Usdc.t.sol` (`pnpm test:fork`):
     - **Market A real position:** 597k PT, 447k USDC debt, HF 1.10. Fully
@@ -740,6 +894,12 @@ loan always repaid), then an external review before moving significant size.
     and the Executor ends empty.
   - The entry tests mock USD3's deposit limit when the live cap is full, and log
     when they do.
+  - `test/fork/AaveV3.t.sol` (`pnpm test:fork`; USDC/USDT unfrozen on the fork
+    to open positions): supply 100k USDC + borrow 60k USDC, then — re-frozen
+    as on mainnet — close in one transaction with a Morpho flash loan of exactly
+    the Aave debt (repay all, pull + withdraw all aUSDC); USDT debt against USDC
+    collateral repaid in part and then in full from the wallet; both Aave guards.
+    The Executor ends with no aTokens (they aren't swept).
 - **Compiler (M1):** golden tests from Plan JSON to calldata, checked against
   the Solidity `test/utils/Plans.sol` prototype.
 - **App unit tests** (`app/test/unit`, 15 tests, no network): patch offsets
@@ -758,7 +918,10 @@ loan always repaid), then an external review before moving significant size.
     validation; search ranking; share-link round trip; the flash-repayment
     error hint.
   - **Integration (fork):** a real 597k-PT loop moved from market A to B in one
-    transaction, then unwound on B with a flow assembled block by block.
+    transaction, then unwound on B with a flow assembled block by block. Aave
+    (`aave.test.ts`): Setup incl. the Aave steps, open via Builder blocks, a
+    frozen-reserve supply explained by the simulation, close via a flash loan
+    sized to the Aave debt, Access lists and revokes the delegations.
   - **E2E:** builds the unwind from the palette, simulates, signs, and checks
     the position closed.
 - **Dev-fork lock:** dev-fork simulation runs snapshot, send and revert. Every
@@ -789,15 +952,17 @@ loan always repaid), then an external review before moving significant size.
 | M0 ✅ | Registry + verified addresses; Executor with patches, flash callback, guards | Fork test: flash-unwind of a real PT-USD3 Morpho loop passes |
 | M1 (built) | Compiler + simulation; UI (Positions, Review/Sign, Setup with deploy + verify, **Access/Revoke**); Rabby + Ledger signing; MEV-protected RPC; local `pnpm start` | ⏳ Real unwind of a small position on mainnet from a Ledger (needs you) |
 | M2 (built) | Builder UI (palette, drag-drop, amounts, validation), templates 7.1–7.4 + move A→B, save/export/share | ✅ Custom unwind built and simulated in ~9 s (automated E2E) |
-| M3 | Re Protocol blocks, PT-reUSD templates, aggregator swaps, roll/migrate | reUSD loop entry and exit on a fork, then mainnet |
-| M4 | ERC-7730 descriptor, EIP-7702 mode | Optional: sign with no Executor deployment, via 7702 |
+| M3 (part: reUSD built) | PT-reUSD templates via aggregator swaps (✅; Re's own mint/redeem is KYC-gated, §6.5), roll/migrate | ✅ reUSD loop entry and exit on a fork; then mainnet |
+| M4 (part: 7702 built) | EIP-7702 mode (✅ §5.4: delegate, Ledger app build, CLI, app support), ERC-7730 descriptor | ✅ 7702 unwind/enter on forks; ⏳ first delegation from a real Nano S Plus |
 
 ---
 
 ## 14. Decisions and open questions
 
 ### Decided (2026-10-30)
-1. **Lending venue:** Morpho Blue.
+1. **Lending venue:** Morpho Blue for the PT loops. Aave v3 Core (USDC/USDT)
+   is a second venue for Builder blocks; PT-USD3 and PT-reUSD aren't listed on
+   Aave.
 2. **Position ownership:** the simpler option. Positions stay under the EOA,
    with a one-time standing authorization for the Executor (§5.2).
 3. **YT coverage:** YT may not always cover the PT, so shortfall handling is a
@@ -810,11 +975,11 @@ loan always repaid), then an external review before moving significant size.
 6. **Wallet:** Rabby, with the Ledger attached. No other connectors (§3).
 7. **Hosting:** local only, served on 127.0.0.1 from your own clone. No public
    or IPFS deploy (§3).
-8. **Markets:** PT-USD3/USDC A and B, plus PT-USD3/USDT, are all supported.
-   The Positions page detects which ones you're in.
+8. **Markets:** PT-USD3/USDC A and B, PT-USD3/USDT and PT-reUSD/USDC are all
+   supported. The Positions page detects which ones you're in.
 9. **Stablecoin swaps:** a major aggregator (0x by default, KyberSwap as the
-   keyless fallback) instead of a single DEX pool. Only USDC/USDT are swapped,
-   never Pendle assets.
+   keyless fallback) instead of a single DEX pool. Only USDC, USDT and reUSD
+   are swapped, never Pendle assets.
 10. **Unwinds use flash loans** (a single pass) in every template.
 11. **MEV protection:** every transaction goes through Flashbots Protect or MEV
     Blocker, set as Rabby's Ethereum RPC. Signing is blocked until you confirm
@@ -831,8 +996,14 @@ loan always repaid), then an external review before moving significant size.
 1. **First real run (M1 exit):** deploy your Executor from your Ledger and unwind
    a small position on mainnet. Everything up to the real device has been
    tested on forks and with a mock wallet.
-2. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
-   decides whether exits use `re.redeem` or a swap (M3).
+2. ~~**reUSD mint/redeem on Ethereum:** permissioned? Instant or queued?~~
+   Answered: KYC-gated, and instant redemptions pay sUSDe. Exits and entries
+   swap reUSD ↔ USDC through the aggregator (§6.5).
 3. **0x API key:** the fork tests used KyberSwap because there's no key in this
    environment. Set `ZEROX_API_KEY` to make 0x the default, and to run the USDT
    tests against 0x routes.
+4. **First 7702 delegation from the Nano S Plus (§5.4):** the Docker build,
+   sideload and device APDUs (`0x02`, `0x34`, `0x04`) are untested on hardware;
+   everything else ran on forks with a key signer. The delegate isn't deployed
+   on mainnet yet (Setup → Deploy). Freeze the contracts before signing: any code
+   change moves the delegate's address and needs a new app build and authorization.

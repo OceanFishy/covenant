@@ -4,8 +4,9 @@ import { AddressLink, Card, Notice, SentLine, useSendTx } from "../components/co
 import { allowance } from "../format";
 import { usePoll } from "../hooks";
 import { readAccess, type Permission } from "../lib/access";
+import { DELEGATE } from "../lib/abis";
 import { publicClient } from "../lib/chain";
-import { MORPHO } from "../lib/registry";
+import { AAVE_RESERVES, MORPHO } from "../lib/registry";
 import { useApp } from "../state";
 
 /**
@@ -50,6 +51,19 @@ export function AccessPage() {
 
   return (
     <>
+      {app.delegation && app.delegation.kind !== "none" && (
+        <Card title="EIP-7702 delegation">
+          <Notice tone="warn">
+            Your account delegates to <AddressLink address={app.delegation.kind === "covenant" ? DELEGATE : app.delegation.delegate} />
+            {app.delegation.kind === "covenant" ? " (the Covenant delegate)" : " (not Covenant)"}: its code runs whenever your
+            account is called. Only transactions you send to your own address can make it act.
+          </Notice>
+          <p className="small">
+            Revoking is an EIP-7702 authorization to the zero address, which Rabby can't send. With the official Ethereum
+            app, from a terminal: <code>cd app && node scripts/ledger7702.mjs revoke</code>
+          </p>
+        </Card>
+      )}
       <Card
         title="Executor access"
         actions={
@@ -61,8 +75,8 @@ export function AccessPage() {
         }
       >
         <p className="muted">
-          Revokes go straight from your wallet to Morpho and the token contracts, never through the Executor. They are
-          plain calls that Rabby and your Ledger display clearly.
+          Revokes go straight from your wallet to Morpho, Aave's debt tokens and the token contracts, never through the
+          Executor. They are plain calls that Rabby and your Ledger display clearly.
         </p>
         {error && <Notice tone="danger">Could not read permissions: {error}</Notice>}
         {executors.length === 0 && <Notice>No Executor known in this browser. Add an address below to check it.</Notice>}
@@ -128,10 +142,15 @@ function Fallback({ perms }: { perms?: Permission[] }) {
     <div className="small">
       <p>
         If this app is unavailable, use Etherscan's “Write contract” tab with Rabby connected. The Morpho authorization
-        does <b>not</b> show in Rabby's Approvals page or revoke.cash, so revoke it here:
+        and Aave credit delegation do <b>not</b> show in Rabby's Approvals page or revoke.cash, so revoke them here:
       </p>
       <ul>
         <li className="mono">Morpho Blue {MORPHO} → setAuthorization(&lt;executor&gt;, false)</li>
+        {AAVE_RESERVES.map((r) => (
+          <li className="mono" key={r.debtToken.address}>
+            {r.debtToken.symbol} {r.debtToken.address} → approveDelegation(&lt;executor&gt;, 0)
+          </li>
+        ))}
         <li>Token approvals: Rabby → Approvals, or each token's approve(&lt;executor&gt;, 0).</li>
         {perms?.map((p) => (
           <li className="mono" key={`m-${p.executor}-${p.kind}-${p.token ?? ""}`}>

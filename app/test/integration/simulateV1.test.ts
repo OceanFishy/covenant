@@ -17,8 +17,8 @@ import {
 } from "viem";
 import { mainnet } from "viem/chains";
 import { parseEventLogs } from "viem";
-import { erc20Abi, executorAbi, loadExecutorBytecode } from "../../src/lib/abis";
-import { deployData } from "../../src/lib/executor";
+import { DELEGATE, delegateAbi, erc20Abi, executorAbi, loadDelegateBytecode } from "../../src/lib/abis";
+import { deployData, initializeTx } from "../../src/lib/executor";
 import { buildUnwind } from "../../src/lib/planner";
 import { readPosition } from "../../src/lib/positions";
 import { MARKETS, MORPHO } from "../../src/lib/registry";
@@ -33,18 +33,11 @@ const word = (v: bigint | Address) => pad(typeof v === "bigint" ? numberToHex(v)
 const mapSlot = (key: Address, slot: bigint | Hex) =>
   keccak256(encodeAbiParameters([{ type: "address" }, { type: typeof slot === "bigint" ? "uint256" : "bytes32" }], [key, slot as never]));
 
-/** Runtime code with the immutables (owner, morpho) filled in, as the constructor would. */
+/** Runtime code exactly as the constructor leaves it (immutables filled): a deployment's eth_call result. */
 async function runtimeCode(owner: Address): Promise<Hex> {
-  const { deployedBytecode, immutableReferences } = await loadExecutorBytecode();
-  const refs = Object.values(immutableReferences);
-  let hex = deployedBytecode.slice(2);
-  // Immutables are assigned in declaration order: owner, then morpho.
-  [owner, MORPHO].forEach((value, i) => {
-    for (const { start, length } of refs[i]) {
-      hex = hex.slice(0, start * 2) + word(value).slice(2) + hex.slice((start + length) * 2);
-    }
-  });
-  return `0x${hex}`;
+  const { data } = await client.call({ account: owner, data: await deployData(owner) });
+  if (!data) throw new Error("simulated deployment returned no code");
+  return data;
 }
 
 /**
@@ -112,6 +105,67 @@ describe("eth_simulateV1 on mainnet", () => {
     const sim = await simulatePlan(client, plan, overrides);
     if (!sim.ok) throw new Error(sim.error);
     expect(sim.method).toBe("eth_simulateV1");
+    expect(sim.borrowSharesAfter).toBe(0n);
+    expect(sim.collateralAfter).toBe(0n);
+    const usdc = sim.changes.find((c) => c.symbol === "USDC")!;
+    expect(usdc.after - usdc.before).toBeGreaterThan(100_000n * 10n ** 6n);
+    const ytChange = sim.changes.find((c) => c.token === yt)!;
+    expect(ytChange.before - ytChange.after).toBe(pos.collateral);
+  }, 120_000);
+
+  it("simulates the same unwind run by the delegated EOA itself (EIP-7702 mode)", async () => {
+    const pos = await readPosition(client, MARKET_A, OWNER);
+    if (pos.borrowShares === 0n) return; // reference position gone
+    const yt = MARKET_A.series.yt;
+    // The delegate isn't deployed on mainnet yet: its runtime code from a simulated deploy.
+    const { bytecode } = await loadDelegateBytecode();
+    const delegateCode = (await client.call({ data: bytecode })).data!;
+    const designator = `0xef0100${DELEGATE.slice(2).toLowerCase()}` as Hex;
+
+    // The allowlist initialize() writes into the EOA's storage (ERC-7201 layout: rules, recipients, configVersion).
+    const init = (await client.request({
+      method: "eth_simulateV1" as never,
+      params: [
+        {
+          blockStateCalls: [
+            {
+              calls: [{ from: OWNER, to: OWNER, data: initializeTx(OWNER).data }],
+              stateOverrides: { [DELEGATE]: { code: delegateCode }, [OWNER]: { code: designator } },
+            },
+          ],
+          validation: false,
+        },
+        "latest",
+      ] as never,
+    })) as { calls: { status: Hex; logs: { address: Address; topics: [Hex, ...Hex[]]; data: Hex }[] }[] }[];
+    expect(init[0].calls[0].status).toBe("0x1");
+    const LAYOUT = 0x7742a91c428d5f4d0ae4f71fc9890b6a2b35ca8734e78b55f6c273de2642f600n;
+    const storage: Record<Hex, Hex> = { [word(LAYOUT + 2n)]: word(1n) };
+    for (const l of parseEventLogs({ abi: delegateAbi, logs: init[0].calls[0].logs as never }) as unknown as { eventName: string; args: Record<string, unknown> }[]) {
+      if (l.eventName === "RuleSet") {
+        const { target, selector, rule } = l.args as { target: Address; selector: Hex; rule: bigint };
+        const inner = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [target, LAYOUT]));
+        storage[keccak256(encodeAbiParameters([{ type: "bytes4" }, { type: "bytes32" }], [selector, inner]))] = word(rule);
+      } else if (l.eventName === "RecipientSet") {
+        const { token, recipient } = l.args as { token: Address; recipient: Address };
+        storage[mapSlot(recipient, mapSlot(token, LAYOUT + 1n))] = word(1n);
+      }
+    }
+
+    const overrides: StateOverrides = {
+      [DELEGATE]: { code: delegateCode },
+      [OWNER]: { code: designator, stateDiff: storage },
+      [yt]: { stateDiff: { [mapSlot(OWNER, 0n)]: word(pos.collateral) } },
+    };
+    const plan = await buildUnwind(client, { ...pos, ytBalance: pos.collateral, matched: pos.collateral }, {
+      owner: OWNER,
+      executor: OWNER,
+      quotes: { aggregator: "kyber", zeroXBase: "", kyberBase: "" },
+      headroomBps: 10,
+      minReceive: 0n,
+    });
+    const sim = await simulatePlan(client, plan, overrides);
+    if (!sim.ok) throw new Error(sim.error);
     expect(sim.borrowSharesAfter).toBe(0n);
     expect(sim.collateralAfter).toBe(0n);
     const usdc = sim.changes.find((c) => c.symbol === "USDC")!;

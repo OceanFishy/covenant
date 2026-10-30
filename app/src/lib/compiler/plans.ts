@@ -1,7 +1,7 @@
 import { encodeFunctionData, formatUnits, type Address } from "viem";
 import { erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../abis";
-import { MORPHO, SWEEP_TOKENS, label, tokenInfo, type Market } from "../registry";
-import { arg, balancePatch, call, encodeExecute, encodeFlashData, hashCalls, morphoPatch } from "./encode";
+import { MORPHO, SWEEP_TOKENS, TRACKED_TOKENS, label, tokenInfo, type Market } from "../registry";
+import { arg, call, encodeExecute, encodeFlashData, hashCalls, heldPatch, is7702, minHeldCall, morphoPatch, pullCall, type Runner } from "./encode";
 import { Source, type Call, type Plan, type PlanKind, type Step, type Swap } from "./types";
 
 /** Flash = live debt + 0.01%; leftovers are swept back to the owner. */
@@ -37,11 +37,9 @@ function approve(token: Address, spender: Address, amount: bigint): Call {
   return call(token, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, amount] }));
 }
 
-function guardMinBalance(x: Ctx, token: Address, min: bigint): Call {
-  return call(
-    x.executor,
-    encodeFunctionData({ abi: executorAbi, functionName: "assertMinBalance", args: [token, x.executor, min] }),
-  );
+/** Step text for bringing wallet funds into the plan (pulled to the Executor, or allotted under 7702). */
+function pullStep(x: Runner, amount: bigint, token: Address): string {
+  return is7702(x) ? `Use ${fmt(amount, token)} from your wallet (allot)` : `Pull ${fmt(amount, token)} from your wallet`;
 }
 
 /** Matched PT+YT redemption of `amount` PT (or the executor's whole PT balance) into tokenOut. */
@@ -51,8 +49,8 @@ function redeem(b: Builder, x: Ctx, amount: bigint | "all", syMinOut: bigint) {
   const ytTransfer = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, amount === "all" ? 0n : amount] });
   const what = amount === "all" ? "all" : fmt(amount, s.pt);
   if (amount === "all") {
-    b.add(call(s.pt, ptTransfer, balancePatch(arg(1), s.pt, x.executor)), `Send ${what} PT to the Pendle YT contract`);
-    b.add(call(s.yt, ytTransfer, balancePatch(arg(1), s.yt, x.executor)), `Send the matching YT to the Pendle YT contract`);
+    b.add(call(s.pt, ptTransfer, heldPatch(x, arg(1), s.pt)), `Send ${what} PT to the Pendle YT contract`);
+    b.add(call(s.yt, ytTransfer, heldPatch(x, arg(1), s.yt)), `Send the matching YT to the Pendle YT contract`);
   } else {
     b.add(call(s.pt, ptTransfer), `Send ${what} to the Pendle YT contract`);
     b.add(call(s.yt, ytTransfer), `Send the matching ${fmt(amount, s.yt)} to the Pendle YT contract`);
@@ -65,7 +63,7 @@ function redeem(b: Builder, x: Ctx, amount: bigint | "all", syMinOut: bigint) {
     call(
       s.sy,
       encodeFunctionData({ abi: syAbi, functionName: "redeem", args: [x.executor, 0n, s.tokenOut, syMinOut, false] }),
-      balancePatch(arg(1), s.sy, x.executor),
+      heldPatch(x, arg(1), s.sy),
     ),
     `Redeem all SY → ${label(s.tokenOut)}${syMinOut > 0n ? ` (min ${fmt(syMinOut, s.tokenOut)})` : ""}`,
   );
@@ -77,12 +75,14 @@ function swapCalls(b: Builder, x: Ctx, swap: Swap) {
     call(swap.target, swap.data),
     `Swap ${fmt(swap.amountIn, swap.sellToken)} → ~${fmt(swap.quotedOut, swap.buyToken)} via ${swap.aggregator === "0x" ? "0x" : "KyberSwap"}`,
   );
-  b.add(guardMinBalance(x, swap.buyToken, swap.minOut), `Check: received at least ${fmt(swap.minOut, swap.buyToken)}`);
+  b.add(minHeldCall(x, swap.buyToken, swap.minOut), `Check: received at least ${fmt(swap.minOut, swap.buyToken)}`);
 }
 
 function finish(kind: PlanKind, x: Ctx, top: Builder, swap?: Swap): Plan {
-  const sweep = SWEEP_TOKENS;
-  top.steps.push({ text: `Send every leftover token back to your wallet`, depth: 0 });
+  // Executor: leftovers are swept to the owner. 7702: they are already in the wallet; the list is
+  // what the delegate tracks so the plan can't spend more than it allots.
+  const sweep = is7702(x) ? TRACKED_TOKENS : SWEEP_TOKENS;
+  top.steps.push({ text: is7702(x) ? "Leftovers stay in your wallet" : "Send every leftover token back to your wallet", depth: 0 });
   const planHash = hashCalls(top.calls);
   return { kind, ...x, calls: top.calls, sweep, steps: top.steps, planHash, data: encodeExecute(top.calls, sweep, planHash), swap };
 }
@@ -112,7 +112,7 @@ export function flashUnwind(input: UnwindInput): Plan {
 
   const inner = new Builder(1);
   inner.add(approve(m.loanToken, MORPHO, 0n), `Approve ${label(m.loanToken)} to Morpho for the repayment`);
-  inner.calls[0].patches.push(balancePatch(arg(1), m.loanToken, executor));
+  inner.calls[0].patches.push(heldPatch(x, arg(1), m.loanToken));
   inner.add(
     call(
       MORPHO,
@@ -138,10 +138,7 @@ export function flashUnwind(input: UnwindInput): Plan {
     call(MORPHO, encodeFunctionData({ abi: morphoAbi, functionName: "accrueInterest", args: [params(m)] })),
     "Accrue interest so the debt is exact",
   );
-  top.add(
-    call(m.series.yt, encodeFunctionData({ abi: erc20Abi, functionName: "transferFrom", args: [owner, executor, matched] })),
-    `Pull ${fmt(matched, m.series.yt)} from your wallet`,
-  );
+  top.add(pullCall(x, m.series.yt, matched), pullStep(x, matched, m.series.yt));
   top.add(
     call(
       MORPHO,
@@ -160,7 +157,7 @@ export function flashUnwind(input: UnwindInput): Plan {
     "Check: no debt left",
   );
   if (input.minReceive > 0n) {
-    top.add(guardMinBalance(x, m.series.tokenOut, input.minReceive), `Check: you receive at least ${fmt(input.minReceive, m.series.tokenOut)}`);
+    top.add(minHeldCall(x, m.series.tokenOut, input.minReceive), `Check: you receive at least ${fmt(input.minReceive, m.series.tokenOut)}`);
   }
   if (!full) top.steps.push({ text: `${fmt(collateral - matched, m.series.pt)} (no YT to match) returns to your wallet, unlevered`, depth: 0 });
   return finish(full ? "unwind" : "deleverage", x, top, input.swap);
@@ -187,7 +184,7 @@ export function partialUnwind(input: PartialInput): Plan {
   );
   inner.add(
     call(MORPHO, encodeFunctionData({ abi: morphoAbi, functionName: "withdrawCollateral", args: [params(m), matched, owner, executor] })),
-    `Withdraw ${fmt(matched, m.series.pt)} (only what your YT covers)`,
+    `Withdraw ${fmt(matched, m.series.pt)} to redeem (the rest stays as collateral)`,
   );
   redeem(inner, x, "all", 0n);
   if (input.swap) swapCalls(inner, x, input.swap);
@@ -195,10 +192,7 @@ export function partialUnwind(input: PartialInput): Plan {
 
   const top = new Builder(0);
   top.add(call(MORPHO, encodeFunctionData({ abi: morphoAbi, functionName: "accrueInterest", args: [params(m)] })), "Accrue interest");
-  top.add(
-    call(m.series.yt, encodeFunctionData({ abi: erc20Abi, functionName: "transferFrom", args: [owner, executor, matched] })),
-    `Pull ${fmt(matched, m.series.yt)} from your wallet`,
-  );
+  top.add(pullCall(x, m.series.yt, matched), pullStep(x, matched, m.series.yt));
   top.add(
     call(
       MORPHO,
@@ -231,19 +225,19 @@ export function enter(input: EnterInput): Plan {
   const inner = new Builder(1);
   if (input.swap) swapCalls(inner, x, input.swap);
   inner.add(
-    call(s.tokenOut, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [s.sy, 0n] }), balancePatch(arg(1), s.tokenOut, executor)),
+    call(s.tokenOut, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [s.sy, 0n] }), heldPatch(x, arg(1), s.tokenOut)),
     `Approve all ${label(s.tokenOut)} to SY`,
   );
   inner.add(
     call(
       s.sy,
       encodeFunctionData({ abi: syAbi, functionName: "deposit", args: [executor, s.tokenOut, 0n, 0n] }),
-      balancePatch(arg(2), s.tokenOut, executor),
+      heldPatch(x, arg(2), s.tokenOut),
     ),
-    `Deposit all ${label(s.tokenOut)} into SY (via 3Jane USD3)`,
+    `Deposit all ${label(s.tokenOut)} into SY${s.viaUsd3 ? " (via 3Jane USD3)" : ""}`,
   );
   inner.add(
-    call(s.sy, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), balancePatch(arg(1), s.sy, executor)),
+    call(s.sy, encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [s.yt, 0n] }), heldPatch(x, arg(1), s.sy)),
     "Send all SY to the Pendle YT contract",
   );
   inner.add(
@@ -251,14 +245,14 @@ export function enter(input: EnterInput): Plan {
     "Mint PT + YT at par (Pendle mintPY; YT goes to your wallet)",
   );
   inner.add(
-    call(s.pt, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [MORPHO, 0n] }), balancePatch(arg(1), s.pt, executor)),
+    call(s.pt, encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [MORPHO, 0n] }), heldPatch(x, arg(1), s.pt)),
     "Approve all PT to Morpho",
   );
   inner.add(
     call(
       MORPHO,
       encodeFunctionData({ abi: morphoAbi, functionName: "supplyCollateral", args: [params(m), 0n, owner, "0x"] }),
-      balancePatch(arg(5), s.pt, executor),
+      heldPatch(x, arg(5), s.pt),
     ),
     "Supply all PT as collateral",
   );
@@ -269,10 +263,7 @@ export function enter(input: EnterInput): Plan {
   inner.steps.push({ text: `Morpho takes the flash loan back`, depth: 1 });
 
   const top = new Builder(0);
-  top.add(
-    call(s.tokenOut, encodeFunctionData({ abi: erc20Abi, functionName: "transferFrom", args: [owner, executor, equity] })),
-    `Pull ${fmt(equity, s.tokenOut)} from your wallet`,
-  );
+  top.add(pullCall(x, s.tokenOut, equity), pullStep(x, equity, s.tokenOut));
   top.add(
     call(MORPHO, encodeFunctionData({ abi: morphoAbi, functionName: "flashLoan", args: [m.loanToken, flash, encodeFlashData(m.loanToken, inner.calls)] })),
     `Flash-borrow ${fmt(flash, m.loanToken)} from Morpho (fee-free)`,

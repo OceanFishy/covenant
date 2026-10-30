@@ -1,13 +1,15 @@
 import type { Address } from "viem";
 import { health, signed, withSymbol } from "../format";
 import type { Plan } from "../lib/compiler/types";
+import { TOKENS } from "../lib/registry";
 import type { SimulationResult } from "../lib/simulate";
 import { AddressLink } from "./common";
+import { ReUsdFeeComparison } from "./ReUsdFeeComparison";
 
 const TITLES: Record<Plan["kind"], string> = {
   unwind: "Full unwind: all debt repaid, all collateral redeemed",
   deleverage: "Repay all debt; PT without matching YT returns to your wallet",
-  partial: "Partial unwind: only the PT your YT covers",
+  partial: "Partial unwind: repays what the redeemed PT pays for; a smaller loop stays open",
   enter: "Enter: open a leveraged PT loop",
   custom: "Custom flow",
 };
@@ -46,6 +48,11 @@ export function SimSummary({ plan, sim, compact }: { plan: Plan; sim: Extract<Si
           <span>· health {health(p.health)}</span>
         </p>
       ))}
+      {sim.aaveHealthAfter !== undefined && (
+        <p className="row small" data-testid="aave-after">
+          <span>Aave v3 after: health {health(sim.aaveHealthAfter)}</span>
+        </p>
+      )}
       <p className="row small muted">
         <span>gas {sim.gasUsed.toLocaleString()}</span>
         <span>· simulated at block {String(sim.block)} ({sim.method})</span>
@@ -53,9 +60,10 @@ export function SimSummary({ plan, sim, compact }: { plan: Plan; sim: Extract<Si
       {plan.swap && (
         <p className="small">
           Swap leg: {withSymbol(plan.swap.amountIn, plan.swap.sellToken)} → ≥ {withSymbol(plan.swap.minOut, plan.swap.buyToken)} via{" "}
-          {plan.swap.aggregator === "0x" ? "0x" : "KyberSwap"} (stablecoins only; checked on-chain).
+          {plan.swap.aggregator === "0x" ? "0x" : "KyberSwap"} (USDC / USDT / reUSD only, never Pendle assets; checked on-chain).
         </p>
       )}
+      {plan.swap?.sellToken === TOKENS.reUSD.address && <ReUsdFeeComparison swap={plan.swap} />}
       {plan.kind === "deleverage" && <OwnerAddress address={plan.owner} />}
     </>
   );

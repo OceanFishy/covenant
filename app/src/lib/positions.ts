@@ -1,6 +1,6 @@
 import type { Address, PublicClient } from "viem";
 import { erc20Abi, irmAbi, morphoAbi, oracleAbi, syAbi, usd3Abi, ytAbi } from "./abis";
-import { MARKETS, MORPHO, TOKENS, type Market } from "./registry";
+import { MARKETS, MORPHO, TOKENS, type Market, type PendleSeries } from "./registry";
 
 const WAD = 10n ** 18n;
 const ORACLE_SCALE = 10n ** 36n;
@@ -30,8 +30,36 @@ export type PositionView = {
   /** Estimated tokenOut from redeeming `matched` PT, and from all PT with enough YT. */
   proceedsMatched: bigint;
   proceedsAll: bigint;
+  /** Loan tokens `proceedsMatched` is expected to repay (see loanValue). */
+  valueMatched: bigint;
   expired: boolean;
 };
+
+/**
+ * What selling a non-USDC tokenOut (reUSD) for USDC costs at size, below its NAV. KyberSwap on
+ * 2026-10-29: 0.36% for 1M reUSD, 0.45% for 5M.
+ */
+const SALE_HAIRCUT_BPS = 100n;
+
+/**
+ * Loan tokens that `proceeds` tokenOut, redeemed from `sy` SY, are expected to repay. USDC counts
+ * 1:1 (for USDT debt too). Any other tokenOut (reUSD) is valued at the SY's asset value (USDC:
+ * SY × exchangeRate, i.e. Re's NAV) less SALE_HAIRCUT_BPS for selling it.
+ */
+function loanValue(s: PendleSeries, proceeds: bigint, sy: bigint, rate: bigint): bigint {
+  if (s.tokenOut === TOKENS.USDC.address) return proceeds;
+  return (((sy * rate) / WAD) * (10_000n - SALE_HAIRCUT_BPS)) / 10_000n;
+}
+
+/** USDC value of `amount` tokenOut: USDC itself, or another token (reUSD) at its SY's asset value (NAV). */
+export async function tokenOutValue(client: PublicClient, s: PendleSeries, amount: bigint): Promise<bigint> {
+  if (s.tokenOut === TOKENS.USDC.address || amount === 0n) return amount;
+  const [sy, rate] = await Promise.all([
+    client.readContract({ address: s.sy, abi: syAbi, functionName: "previewDeposit", args: [s.tokenOut, amount] }),
+    client.readContract({ address: s.sy, abi: syAbi, functionName: "exchangeRate" }),
+  ]);
+  return (sy * rate) / WAD;
+}
 
 function mulDivUp(a: bigint, b: bigint, d: bigint): bigint {
   return (a * b + d - 1n) / d;
@@ -116,6 +144,7 @@ export async function readPositionsFor(client: PublicClient, markets: Market[], 
           client.readContract({ address: s.yt, abi: erc20Abi, functionName: "balanceOf", args: [owner] }),
           client.readContract({ address: s.yt, abi: ytAbi, functionName: "isExpired" }),
           client.readContract({ address: s.yt, abi: ytAbi, functionName: "pyIndexStored" }),
+          client.readContract({ address: s.sy, abi: syAbi, functionName: "exchangeRate" }),
         ]),
       ),
     ),
@@ -125,9 +154,9 @@ export async function readPositionsFor(client: PublicClient, markets: Market[], 
 
   const rows = markets.map((m, i) => {
     const [[, borrowShares, collateral], raw, price] = perMarket[i];
-    const [ytBalance, expired, pyIndex] = perSeries[seriesList.indexOf(m.series)];
+    const [ytBalance, expired, pyIndex, syRate] = perSeries[seriesList.indexOf(m.series)];
     const matched = expired ? collateral : collateral < ytBalance ? collateral : ytBalance;
-    return { m, borrowShares, collateral, raw, price, ytBalance, expired, pyIndex, matched };
+    return { m, borrowShares, collateral, raw, price, ytBalance, expired, pyIndex, syRate, matched };
   });
 
   const previews = (r: (typeof rows)[number], pt: bigint) =>
@@ -168,6 +197,7 @@ export async function readPositionsFor(client: PublicClient, markets: Market[], 
       ytBalance: r.ytBalance,
       matched: r.matched,
       proceedsMatched,
+      valueMatched: loanValue(r.m.series, proceedsMatched, (r.matched * WAD) / r.pyIndex, r.syRate),
       proceedsAll: proceedsAllMaybe ?? proceedsMatched,
       expired: r.expired,
     };
@@ -189,4 +219,22 @@ export async function usd3Limits(client: PublicClient, sy: Address) {
     client.readContract({ address: TOKENS.USD3.address, abi: usd3Abi, functionName: "maxDeposit", args: [sy] }),
   ]);
   return { withdraw, deposit };
+}
+
+/**
+ * The most PT (with equal YT) of a USD3 series that can be redeemed to USDC right now, i.e. what
+ * 3Jane's USDC reserve can pay out. SY-USD3 holds USD3 1:1 and USD3 lets it redeem at most
+ * `maxRedeem(SY)` shares (its idle + withdrawable liquidity, after 3Jane's floors). redeemPY gives
+ * floor(PT × 1e18 / index) SY at the index it computes on execution, max(stored, SY.exchangeRate()),
+ * so floor(maxRedeem × index / 1e18) PT never asks for more than `maxRedeem` and drains it to
+ * within a share.
+ */
+export async function usd3RedeemablePt(client: PublicClient, s: PendleSeries): Promise<bigint> {
+  const [maxSy, stored, rate] = await Promise.all([
+    client.readContract({ address: TOKENS.USD3.address, abi: usd3Abi, functionName: "maxRedeem", args: [s.sy] }),
+    client.readContract({ address: s.yt, abi: ytAbi, functionName: "pyIndexStored" }),
+    client.readContract({ address: s.sy, abi: syAbi, functionName: "exchangeRate" }),
+  ]);
+  const index = rate > stored ? rate : stored;
+  return (maxSy * index) / WAD;
 }

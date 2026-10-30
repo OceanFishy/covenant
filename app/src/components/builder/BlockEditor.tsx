@@ -2,7 +2,9 @@ import type { Address } from "viem";
 import { PULL_TOKENS, SWAP_TOKENS } from "../../lib/builder/catalog";
 import { marketByKey, seriesByKey } from "../../lib/builder/compile";
 import type { Amount, Block } from "../../lib/builder/types";
-import { MARKETS, SERIES, TOKENS, label } from "../../lib/registry";
+import { AAVE_RESERVES, MARKETS, SERIES, TOKENS, label } from "../../lib/registry";
+
+const AAVE_ASSETS: Address[] = AAVE_RESERVES.map((r) => r.asset);
 
 type Props<B extends Block> = { block: B; onChange: (b: Block) => void };
 
@@ -46,6 +48,9 @@ const KIND_LABEL: Record<Amount["kind"], string> = {
   debt: "Whole debt",
   collateral: "All collateral",
   allShares: "All debt (by shares)",
+  aaveDebt: "Whole Aave debt",
+  allDebt: "All debt (exact)",
+  supplied: "All supplied",
 };
 
 /** Amount picker limited to the kinds a block supports; fixed amounts are in `unit`. */
@@ -54,12 +59,15 @@ function AmountEditor<A extends Amount>({
   kinds,
   unit,
   market,
+  aaveAsset,
   onChange,
 }: {
   value: A;
   kinds: Amount["kind"][];
   unit: string;
   market?: string;
+  /** Default asset for a new "Whole Aave debt" amount. */
+  aaveAsset?: Address;
   onChange: (a: A) => void;
 }) {
   const make = (kind: Amount["kind"]): Amount => {
@@ -68,6 +76,8 @@ function AmountEditor<A extends Amount>({
         return { kind, value: value.kind === "fixed" ? value.value : "0" };
       case "debt":
         return { kind, market: market ?? MARKETS[0].key, bps: 10_001 };
+      case "aaveDebt":
+        return { kind, asset: aaveAsset ?? TOKENS.USDC.address, bps: 10_000 };
       default:
         return { kind } as Amount;
     }
@@ -89,10 +99,14 @@ function AmountEditor<A extends Amount>({
           <span className="muted small">{unit}</span>
         </>
       )}
-      {value.kind === "debt" && (
+      {(value.kind === "debt" || value.kind === "aaveDebt") && (
         <>
           <span className="muted small">of</span>
-          <MarketSelect value={value.market} onChange={(m) => onChange({ ...value, market: m })} />
+          {value.kind === "debt" ? (
+            <MarketSelect value={value.market} onChange={(m) => onChange({ ...value, market: m })} />
+          ) : (
+            <TokenSelect value={value.asset} options={AAVE_ASSETS} onChange={(asset) => onChange({ ...value, asset })} aria="Aave debt token" />
+          )}
           <span className="muted small">+</span>
           <input
             className="num short"
@@ -126,7 +140,7 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
       return (
         <span className="row tight">
           <TokenSelect value={b.token} options={[TOKENS.USDC.address, TOKENS.USDT.address]} onChange={(token) => set({ token })} aria="loan token" />
-          <AmountEditor value={b.amount} kinds={["debt", "fixed"]} unit={label(b.token)} onChange={(amount) => set({ amount })} />
+          <AmountEditor value={b.amount} kinds={["debt", "aaveDebt", "fixed"]} unit={label(b.token)} aaveAsset={b.token} onChange={(amount) => set({ amount })} />
         </span>
       );
     case "repay":
@@ -166,7 +180,7 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
       );
     case "redeemSY": {
       const s = seriesByKey(b.series);
-      const outs = s.name.includes("reUSD") ? [TOKENS.reUSD.address] : [TOKENS.USDC.address, TOKENS.USD3.address];
+      const outs = s.viaUsd3 ? [TOKENS.USDC.address, TOKENS.USD3.address] : [s.tokenOut];
       return (
         <span className="row tight">
           <SeriesSelect value={b.series} onChange={(series) => set({ series, tokenOut: seriesByKey(series).tokenOut })} />
@@ -177,11 +191,13 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
         </span>
       );
     }
-    case "mintPY":
+    case "mintPY": {
+      const s = seriesByKey(b.series);
+      const ins = s.viaUsd3 ? [TOKENS.USDC.address, TOKENS.USD3.address] : [s.tokenOut];
       return (
         <span className="row tight">
-          <SeriesSelect value={b.series} onChange={(series) => set({ series })} />
-          <TokenSelect value={b.tokenIn} options={[TOKENS.USDC.address, TOKENS.USD3.address]} onChange={(tokenIn) => set({ tokenIn })} aria="token in" />
+          <SeriesSelect value={b.series} onChange={(series) => set({ series, tokenIn: seriesByKey(series).tokenOut })} />
+          <TokenSelect value={b.tokenIn} options={ins} onChange={(tokenIn) => set({ tokenIn })} aria="token in" />
           <AmountEditor value={b.amount} kinds={["balance", "fixed"]} unit={label(b.tokenIn)} onChange={(amount) => set({ amount })} />
           <select value={b.ytTo} onChange={(e) => set({ ytTo: e.target.value as "wallet" | "executor" })} aria-label="YT goes to">
             <option value="wallet">YT → your wallet</option>
@@ -189,6 +205,7 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
           </select>
         </span>
       );
+    }
     case "swap":
       return (
         <span className="row tight">
@@ -199,7 +216,13 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
             <option value="minOut">buy at least</option>
             <option value="exactIn">sell exactly</option>
           </select>
-          <AmountEditor value={b.amount} kinds={b.mode === "minOut" ? ["fixed", "debt"] : ["fixed"]} unit={label(b.mode === "exactIn" ? b.sell : b.buy)} onChange={(amount) => set({ amount })} />
+          <AmountEditor
+            value={b.amount}
+            kinds={b.mode === "minOut" ? ["fixed", "debt", "aaveDebt"] : ["fixed"]}
+            unit={label(b.mode === "exactIn" ? b.sell : b.buy)}
+            aaveAsset={b.buy}
+            onChange={(amount) => set({ amount })}
+          />
         </span>
       );
     case "guardMinBalance":
@@ -214,6 +237,32 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
         <span className="row tight">
           <MarketSelect value={b.market} onChange={(market) => set({ market })} />
           <span className="muted small">≥</span>
+          <input className="num short" inputMode="decimal" value={b.min} onChange={(e) => set({ min: e.target.value })} aria-label="minimum health factor" />
+        </span>
+      );
+    case "aaveSupply":
+    case "aaveWithdraw":
+    case "aaveBorrow":
+    case "aaveRepay": {
+      const kinds: Record<typeof b.type, Amount["kind"][]> = {
+        aaveSupply: ["balance", "fixed"],
+        aaveWithdraw: ["supplied", "fixed"],
+        aaveBorrow: ["fixed"],
+        aaveRepay: ["allDebt", "balance", "fixed"],
+      };
+      return (
+        <span className="row tight">
+          <TokenSelect value={b.asset} options={AAVE_ASSETS} onChange={(asset) => set({ asset })} aria="Aave asset" />
+          <AmountEditor<Amount> value={b.amount} kinds={kinds[b.type]} unit={label(b.asset)} onChange={(amount) => set({ amount } as Partial<Block>)} />
+        </span>
+      );
+    }
+    case "guardAaveNoDebt":
+      return <TokenSelect value={b.asset} options={AAVE_ASSETS} onChange={(asset) => set({ asset })} aria="Aave asset" />;
+    case "guardAaveHealth":
+      return (
+        <span className="row tight">
+          <span className="muted small">Aave health factor ≥</span>
           <input className="num short" inputMode="decimal" value={b.min} onChange={(e) => set({ min: e.target.value })} aria-label="minimum health factor" />
         </span>
       );

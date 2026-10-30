@@ -1,7 +1,8 @@
 import { formatUnits, type Address } from "viem";
+import { FLASH_DEBT_BPS } from "../compiler/plans";
+import { unwindMode } from "../planner";
 import type { PositionView } from "../positions";
 import { tokenInfo, type Market } from "../registry";
-import { FLASH_DEBT_BPS } from "../compiler/plans";
 import { newId } from "./catalog";
 import type { Block, Fixed, Flow } from "./types";
 
@@ -73,10 +74,31 @@ export function partialFlow(p: PositionView, repayAssets: bigint, minHealth: str
   };
 }
 
-/** §7.4 Enter: flash, (swap), mint PT+YT at par (YT to wallet), supply PT, borrow to repay. */
-export function enterFlow(m: Market, equity: bigint, leverage: number, minHealth = "1.02"): Flow {
+/** The exit `p` allows (planner.unwindMode): unwind, deleverage, or a partial repaying 99% of the proceeds' value. */
+export function exitFlow(p: PositionView): Flow {
+  if (unwindMode(p) !== "partial") return unwindFlow(p);
+  const repay = (p.valueMatched * 9_900n) / 10_000n;
+  return partialFlow(p, repay, (Number(p.healthFactor / 10n ** 14n) / 10_000).toFixed(3));
+}
+
+/**
+ * Max unwind: the exit that redeems the most PT possible right now. `p` comes from
+ * planner.capToReserve, so `matched` is the PT your YT covers, capped by 3Jane's USDC reserve; when
+ * the reserve is the smaller limit the flow drains it and repays as much debt as that pays for.
+ */
+export function maxUnwindFlow(p: PositionView): Flow {
+  if (p.matched === 0n) throw new Error("Nothing can be unwound right now: 3Jane's USDC reserve is empty or you hold no YT.");
+  return { ...exitFlow(p), name: `Max unwind ${p.market.label}` };
+}
+
+/**
+ * §7.4 Enter: flash, (swap), mint PT+YT at par (YT to wallet), supply PT, borrow to repay.
+ * `equity` is in tokenOut; `equityValue` is its value in the loan token (positions.tokenOutValue),
+ * which sizes the flash loan: equityValue × (leverage − 1).
+ */
+export function enterFlow(m: Market, equity: bigint, equityValue: bigint, leverage: number, minHealth = "1.02"): Flow {
   const s = m.series;
-  const flash = (equity * BigInt(Math.round((leverage - 1) * 10_000))) / 10_000n;
+  const flash = (equityValue * BigInt(Math.round((leverage - 1) * 10_000))) / 10_000n;
   const inner: Block[] = [];
   if (needsSwap(m)) inner.push({ id: newId(), type: "swap", sell: m.loanToken, buy: s.tokenOut, mode: "exactIn", amount: fixed(flash, m.loanToken) });
   inner.push(

@@ -16,6 +16,27 @@
       "inputs": [
         {
           "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "health",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "min",
+          "type": "uint256"
+        }
+      ],
+      "name": "AaveHealthTooLow",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
           "name": "target",
           "type": "address"
         },
@@ -42,6 +63,27 @@
         }
       ],
       "name": "BadPatch",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "balance",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "max",
+          "type": "uint256"
+        }
+      ],
+      "name": "BalanceTooHigh",
       "type": "error"
     },
     {
@@ -282,6 +324,19 @@
       "type": "function"
     },
     {
+      "inputs": [],
+      "name": "aavePool",
+      "outputs": [
+        {
+          "internalType": "contract IAavePool",
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
       "inputs": [
         {
           "internalType": "address",
@@ -302,6 +357,47 @@
           "type": "bool"
         }
       ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "max",
+          "type": "uint256"
+        }
+      ],
+      "name": "assertMaxBalance",
+      "outputs": [],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "minHealth",
+          "type": "uint256"
+        }
+      ],
+      "name": "assertMinAaveHealth",
+      "outputs": [],
       "stateMutability": "view",
       "type": "function"
     },
@@ -347,6 +443,24 @@
         }
       ],
       "name": "assertMinHealth",
+      "outputs": [],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "min",
+          "type": "uint256"
+        }
+      ],
+      "name": "assertMinOwned",
       "outputs": [],
       "stateMutability": "view",
       "type": "function"
@@ -415,7 +529,7 @@
                   "type": "uint32"
                 },
                 {
-                  "internalType": "enum CovenantExecutor.Source",
+                  "internalType": "enum CovenantCore.Source",
                   "name": "source",
                   "type": "uint8"
                 },
@@ -430,12 +544,12 @@
                   "type": "uint32"
                 }
               ],
-              "internalType": "struct CovenantExecutor.Patch[]",
+              "internalType": "struct CovenantCore.Patch[]",
               "name": "patches",
               "type": "tuple[]"
             }
           ],
-          "internalType": "struct CovenantExecutor.Call[]",
+          "internalType": "struct CovenantCore.Call[]",
           "name": "calls",
           "type": "tuple[]"
         },
