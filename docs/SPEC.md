@@ -1,6 +1,6 @@
 # Covenant: Transaction Composer for Ledger
 
-**Status:** Draft v0.3 · **Owner:** fish · **Date:** 2026-10-30
+**Status:** Draft v0.4 · **Owner:** fish · **Date:** 2026-10-30
 
 Covenant is a web app for building DeFi transactions out of reusable **blocks**
 and executing the whole chain **atomically, in one Ledger signature**. The first
@@ -76,28 +76,43 @@ you exposed to price moves and liquidation risk.
 ## 3. System architecture
 
 ```
-┌────────────────────────── Browser (static SPA) ───────────────────────────┐
+┌──────────────────── Browser · http://127.0.0.1 (local only) ──────────────┐
 │  Block Builder UI ──► Plan (JSON) ──► Compiler ──► Executor calldata      │
 │        ▲                   │                            │                 │
 │   Templates           Quote engine               Simulator (fork)          │
 │   (local + git)   (Pendle API, 1inch/0x,        balance diffs, HF, gas     │
 │                    on-chain previews)                   │                 │
 │                                                         ▼                 │
-│                                         Ledger (WebHID / Ledger Live /     │
-│                                         Rabby or Frame with Ledger)       │
+│                                         Rabby (EIP-1193) ──► Ledger        │
+│                                                                           │
 └───────────────────────────────────────────────────────────┬───────────────┘
                                                             ▼
                     Ethereum: CovenantExecutor ──► Morpho / Pendle / 3Jane / Re / DEX
 ```
 
 - **Frontend:** Vite + React + TypeScript, `viem` + `wagmi`, `dnd-kit` for drag
-  and drop, Zustand for state. It's a static site that can be pinned to IPFS or
-  run on `localhost`, with no server needed.
-- **Wallet connection:** in order of preference,
-  1. Direct Ledger over **WebHID** (`@ledgerhq/hw-app-eth`): the shortest path
-     and fewest intermediaries.
-  2. Rabby or Frame with the Ledger attached.
-  3. WalletConnect to Ledger Live.
+  and drop, Zustand for state. There's no backend.
+- **Hosting: local only.**
+  - **Running it:** clone the repo, then `pnpm install && pnpm start`. That
+    builds the app and serves it with `vite preview`, bound to `127.0.0.1` only
+    (never `0.0.0.0`). It's never deployed to a public URL or IPFS.
+  - **Dependencies:** pinned by the lockfile. `pnpm install --frozen-lockfile`
+    is the only supported install.
+  - **Local storage:** settings (RPC URL, simulation API key) live in
+    `.env.local`, which is gitignored. Templates are JSON files in `templates/`
+    in the repo, plus browser local storage for drafts.
+  - **Outbound connections:** only to your RPC, the simulation provider and quote
+    APIs. A strict Content-Security-Policy limits `connect-src` to those hosts.
+- **Wallet connection: Rabby, with the Ledger attached as a hardware wallet.**
+  - **Connecting:** Covenant finds Rabby through EIP-6963 (`wagmi` injected
+    connector) and sends transactions via `eth_sendTransaction`. Rabby forwards
+    them to the Ledger to sign.
+  - **No other connectors:** no WalletConnect, Ledger Live or direct WebHID
+    connection. That keeps the code and the attack surface small.
+  - **Network check:** Covenant checks that Rabby is on Ethereum mainnet (chain 1)
+    and that the account is the Executor's owner before enabling Sign.
+  - **Rabby's own pre-sign simulation** is a second, independent check. It
+    should show the same balance changes as Covenant's review screen.
 - **RPC:** a user-supplied RPC URL (stored locally) plus a fallback. Simulation
   uses `eth_simulateV1` where the RPC supports it, otherwise a Tenderly or
   Alchemy simulation API key the user supplies.
@@ -414,7 +429,10 @@ roll also needs YT ≥ PT for the old maturity.
 The Executor's `execute(Call[])` calldata is dynamic, so the Ledger **will
 blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
 
-1. **Decoded review screen** before signing: each block in plain English, the
+1. **Two independent previews:** Covenant's decoded review screen (below) and
+   Rabby's own pre-sign simulation, both before the Ledger prompt. If they
+   disagree, don't sign.
+   **Covenant's decoded review screen**: each block in plain English, the
    resolved addresses (with labels from the registry), the min/max bounds, and
    the simulated balance diff for the EOA ("−0 PT-USD3, −0 YT-USD3, +412,331.22
    USDC, debt 389,004.10 → 0").
@@ -509,7 +527,7 @@ truth during simulation.
 | Leftover approvals | Exact amounts, reset at the end. Permit2 with short expiry |
 | Bad quote or sandwich | On-chain `minOut` per swap or redeem. Private RPC. Simulation at the latest block |
 | Pendle assets get traded by mistake | No Pendle router or market on the allowlist. Selector and recipient checks on PT/YT/SY (§5.1) |
-| A compromised frontend builds a malicious plan | Static, self-hosted or IPFS build with pinned dependencies; target allowlist on-chain; decoded review + hash match; `rescue` is owner-only |
+| A compromised frontend builds a malicious plan | Local-only build from your own clone, bound to 127.0.0.1, lockfile-pinned dependencies, strict CSP; target allowlist on-chain; decoded review + hash match; `rescue` is owner-only |
 | Registry typo | Allowlist changes are separate owner transactions, shown in a diff |
 | Protocol risk (3Jane liquidity, reUSD underwriting losses, PT stranded by a YT shortfall) | Surfaced as preflight warnings with live numbers |
 
@@ -525,9 +543,12 @@ loan always repaid), then an external review before moving significant size.
   with real positions (impersonate a whale, open a loop, unwind it).
 - **Compiler:** golden tests from Plan JSON to calldata, and property tests that
   every compiled plan passes the static validator.
-- **E2E:** Playwright against an anvil fork, with the Ledger mocked by a
-  `viem` local account. Run manually on a real Ledger with Speculos (the Ledger
-  emulator) in CI for the signing path.
+- **E2E:** Playwright against an anvil fork, with Rabby replaced by a mock
+  EIP-1193 provider backed by a `viem` local account.
+- **Real Ledger + Rabby dry run:** add the anvil fork to Rabby as a custom
+  network with a **different chain id** (for example 31337), never as
+  "Ethereum" on chain 1. A transaction signed for a chain-1 fork could be
+  replayed on mainnet. Then run each template end to end with the real device.
 
 ---
 
@@ -536,10 +557,10 @@ loan always repaid), then an external review before moving significant size.
 | # | Scope | Exit criteria |
 |---|---|---|
 | M0 | Registry + verified addresses; Foundry Executor with patches, flash callback, guards | Fork test: flash-unwind of a PT-USD3 Morpho loop passes |
-| M1 | Compiler + Plan JSON + simulation; minimal UI (Positions + Review/Sign); Ledger WebHID | Real unwind of a small position on mainnet from a Ledger |
+| M1 | Compiler + Plan JSON + simulation; minimal UI (Positions + Review/Sign); Rabby + Ledger signing; local `pnpm start` | Real unwind of a small position on mainnet from a Ledger |
 | M2 | Full Builder UI (palette, drag-drop, amount wiring), templates 7.1–7.4 | Build a new custom flow in < 60s |
 | M3 | Re Protocol blocks, PT-reUSD templates, aggregator swaps, roll/migrate | reUSD loop entry and exit on a fork, then mainnet |
-| M4 | ERC-7730 descriptor, EIP-7702 mode, private RPC, Speculos CI | Optional: sign with no Executor deployment, via 7702 |
+| M4 | ERC-7730 descriptor, EIP-7702 mode, private RPC | Optional: sign with no Executor deployment, via 7702 |
 
 ---
 
@@ -554,17 +575,16 @@ loan always repaid), then an external review before moving significant size.
 4. **Chain:** Ethereum mainnet only, including for the reUSD loops.
 5. **Pendle:** redeem only. The contract never buys or sells PT, YT, SY or LP,
    and this is enforced on-chain (§5.1). A YT shortfall means a matched or
-   partial unwind, never a PT sale (§6.3).
+   partial unwind, never a PT sale (§6.3). **Minting and redeeming PT+YT is
+   allowed** (for entry, exit and rolls).
+6. **Wallet:** Rabby, with the Ledger attached. No other connectors (§3).
+7. **Hosting:** local only, served on 127.0.0.1 from your own clone. No public
+   or IPFS deploy (§3).
 
 ### Still open
 1. **Does Pendle's SY-USD3 support USDC as `tokenOut` directly?** If so,
    `redeemSY` + `redeemUSD3` collapse into one call. Check on-chain during M0.
-2. **Is `mintPY` OK for entering loops?** It isn't a trade (you receive PT and
-   YT at par), but if you want Covenant to be exit-only, entry templates
-   (§7.4) get dropped.
-3. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
+2. **3Jane USD3 liquidity:** typical `maxRedeem` versus your position size. Is a
    partial unwind needed?
-4. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
+3. **reUSD mint/redeem on Ethereum:** permissioned? Instant or queued? This
    decides whether exits use `re.redeem` or a swap.
-5. **Wallet path:** WebHID direct, Rabby + Ledger, or Ledger Live?
-6. **Hosting:** localhost only, or an IPFS deploy?
