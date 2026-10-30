@@ -6,7 +6,7 @@ import { usePoll } from "../hooks";
 import { readAccess, type Permission } from "../lib/access";
 import { DELEGATE } from "../lib/abis";
 import { publicClient } from "../lib/chain";
-import { AAVE_RESERVES, MORPHO } from "../lib/registry";
+import { AAVE_RESERVES, AAVE_V4, AAVE_V4_RESERVES, MORPHO } from "../lib/registry";
 import { useApp } from "../state";
 
 /**
@@ -75,8 +75,8 @@ export function AccessPage() {
         }
       >
         <p className="muted">
-          Revokes go straight from your wallet to Morpho, Aave's debt tokens and the token contracts, never through the
-          Executor. They are plain calls that Rabby and your Ledger display clearly.
+          Revokes go straight from your wallet to Morpho, Aave's debt tokens, the Aave v4 Taker and the token contracts,
+          never through the Executor. They are plain calls that Rabby and your Ledger display clearly.
         </p>
         {error && <Notice tone="danger">Could not read permissions: {error}</Notice>}
         {executors.length === 0 && <Notice>No Executor known in this browser. Add an address below to check it.</Notice>}
@@ -141,14 +141,20 @@ function Fallback({ perms }: { perms?: Permission[] }) {
   return (
     <div className="small">
       <p>
-        If this app is unavailable, use Etherscan's “Write contract” tab with Rabby connected. The Morpho authorization
-        and Aave credit delegation do <b>not</b> show in Rabby's Approvals page or revoke.cash, so revoke them here:
+        If this app is unavailable, use Etherscan's “Write contract” tab with Rabby connected. The Morpho authorization,
+        Aave credit delegation and Aave v4 Taker allowances do <b>not</b> show in Rabby's Approvals page or revoke.cash, so
+        revoke them here:
       </p>
       <ul>
         <li className="mono">Morpho Blue {MORPHO} → setAuthorization(&lt;executor&gt;, false)</li>
         {AAVE_RESERVES.map((r) => (
           <li className="mono" key={r.debtToken.address}>
             {r.debtToken.symbol} {r.debtToken.address} → approveDelegation(&lt;executor&gt;, 0)
+          </li>
+        ))}
+        {AAVE_V4_RESERVES.map((r) => (
+          <li className="mono" key={`v4-${r.symbol}`}>
+            Aave v4 Taker {AAVE_V4.taker} → approveBorrow / approveWithdraw({AAVE_V4.spoke}, {String(r.reserveId)}, &lt;executor&gt;, 0)
           </li>
         ))}
         <li>Token approvals: Rabby → Approvals, or each token's approve(&lt;executor&gt;, 0).</li>

@@ -31,6 +31,53 @@
       "inputs": [
         {
           "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "reserveId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "debt",
+          "type": "uint256"
+        }
+      ],
+      "name": "AaveV4DebtRemaining",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "health",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "min",
+          "type": "uint256"
+        }
+      ],
+      "name": "AaveV4HealthTooLow",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
           "name": "token",
           "type": "address"
         },
@@ -488,6 +535,29 @@
       "inputs": [
         {
           "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "minHealth",
+          "type": "uint256"
+        }
+      ],
+      "name": "assertMinAaveV4Health",
+      "outputs": [],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
           "name": "token",
           "type": "address"
         },
@@ -544,6 +614,29 @@
         }
       ],
       "name": "assertMinOwned",
+      "outputs": [],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "reserveId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        }
+      ],
+      "name": "assertNoAaveV4Debt",
       "outputs": [],
       "stateMutability": "view",
       "type": "function"
@@ -957,7 +1050,7 @@
       "type": "receive"
     }
   ],
-  "address": "0xf29AC9B5d96f421ED0c8d488B6fF645D458779c7",
+  "address": "0x5B78c1B529690F80701fC615487Ea333549B8153",
   "factory": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
   "salt": "0x0000000000000000000000000000000000000000000000000000000000000000"
 }

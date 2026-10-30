@@ -320,7 +320,7 @@ describe("EIP-7702 mode: the delegated EOA runs the TS-compiled plans itself", (
     await req({ method: "hardhat_setCode", params: [owner, `0xef0100${DELEGATE.slice(2).toLowerCase()}`] });
     expect(await verifyExecutor(client, owner, owner)).toMatchObject({ ok: false }); // allowlist not written yet
     await sendAs(owner, initializeTx(owner));
-    expect(await readDelegation(client, owner)).toEqual({ kind: "covenant", configVersion: 1n, expected: 1n });
+    expect(await readDelegation(client, owner)).toEqual({ kind: "covenant", configVersion: 2n, expected: 2n });
     expect(await verifyExecutor(client, owner, owner)).toEqual({ ok: true });
 
     const pos0 = await readPosition(client, MARKET_A, owner);

@@ -9,6 +9,7 @@ import {MainnetConfig as M} from "../contracts/config/MainnetConfig.sol";
 import {IERC20} from "../contracts/interfaces/IERC20.sol";
 import {IMorpho, MarketParams} from "../contracts/interfaces/IMorpho.sol";
 import {IAaveDebtToken, IAavePool} from "../contracts/interfaces/IAave.sol";
+import {IAaveV4Giver, IAaveV4Spoke, IAaveV4Taker} from "../contracts/interfaces/IAaveV4.sol";
 import {Plans} from "./utils/Plans.sol";
 
 /// Records calls so allowed plans can run without a fork.
@@ -214,5 +215,50 @@ contract CovenantExecutorTest is Test {
             );
             _run(Plans.call(others[i], abi.encodeCall(IERC20.approve, (M.AAVE_POOL, 1))));
         }
+    }
+
+    /// Giver / Taker (Executor) and the Spoke itself (EIP-7702) act for `onBehalfOf`: it must be
+    /// the owner or this contract.
+    function test_aaveV4OnBehalfPinned() public {
+        address spoke = M.AAVE_V4_MAIN_SPOKE;
+        uint256 r = M.AAVE_V4_USDC_RESERVE;
+        bytes[8] memory calls = [
+            abi.encodeCall(IAaveV4Giver.supplyOnBehalfOf, (spoke, r, 1, attacker)),
+            abi.encodeCall(IAaveV4Giver.repayOnBehalfOf, (spoke, r, 1, attacker)),
+            abi.encodeCall(IAaveV4Taker.withdrawOnBehalfOf, (spoke, r, 1, attacker)),
+            abi.encodeCall(IAaveV4Taker.borrowOnBehalfOf, (spoke, r, 1, attacker)),
+            abi.encodeCall(IAaveV4Spoke.supply, (r, 1, attacker)),
+            abi.encodeCall(IAaveV4Spoke.repay, (r, 1, attacker)),
+            abi.encodeCall(IAaveV4Spoke.withdraw, (r, 1, attacker)),
+            abi.encodeCall(IAaveV4Spoke.borrow, (r, 1, attacker))
+        ];
+        address[8] memory targets =
+            [M.AAVE_V4_GIVER, M.AAVE_V4_GIVER, M.AAVE_V4_TAKER, M.AAVE_V4_TAKER, spoke, spoke, spoke, spoke];
+        for (uint256 i; i < calls.length; ++i) {
+            vm.expectRevert(
+                abi.encodeWithSelector(CovenantCore.ArgNotSelfOrOwner.selector, targets[i], bytes4(calls[i]), i < 4 ? 3 : 2)
+            );
+            _run(Plans.call(targets[i], calls[i]));
+        }
+    }
+
+    /// Only the owner grants v4 access, from their wallet: a plan can't hand out Taker allowances
+    /// or approve position managers on a Spoke.
+    function test_aaveV4PermissionsNeverFromPlans() public {
+        bytes memory borrowTo = abi.encodeCall(IAaveV4Taker.approveBorrow, (M.AAVE_V4_MAIN_SPOKE, 7, attacker, 1));
+        vm.expectRevert(abi.encodeWithSelector(CovenantCore.CallNotAllowed.selector, M.AAVE_V4_TAKER, bytes4(borrowTo)));
+        _run(Plans.call(M.AAVE_V4_TAKER, borrowTo));
+
+        bytes memory pm = abi.encodeCall(IAaveV4Spoke.setUserPositionManager, (attacker, true));
+        vm.expectRevert(abi.encodeWithSelector(CovenantCore.CallNotAllowed.selector, M.AAVE_V4_MAIN_SPOKE, bytes4(pm)));
+        _run(Plans.call(M.AAVE_V4_MAIN_SPOKE, pm));
+    }
+
+    /// Only USDC and USDT can be approved to the v4 Giver, so Pendle assets never reach Aave v4.
+    function test_onlyStablecoinsApprovedToAaveV4() public {
+        assertTrue(exec.allowedRecipient(M.USDC, M.AAVE_V4_GIVER));
+        assertTrue(exec.allowedRecipient(M.USDT, M.AAVE_V4_GIVER));
+        vm.expectRevert(abi.encodeWithSelector(CovenantCore.RecipientNotAllowed.selector, M.PT_USD3, M.AAVE_V4_GIVER));
+        _run(Plans.call(M.PT_USD3, abi.encodeCall(IERC20.approve, (M.AAVE_V4_GIVER, 1))));
     }
 }

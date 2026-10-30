@@ -28,9 +28,9 @@ PT-reUSD (Re Protocol), with USDC borrowed on Morpho Blue.
 - Automation or keepers (bots that unwind on a trigger).
 - Multi-chain. v1 is Ethereum mainnet only. The registry is chain-keyed so other
   chains can be added later.
-- Supporting every protocol. v1 covers Morpho Blue, Aave v3 Core (USDC/USDT),
-  Pendle V2, 3Jane, Re Protocol and generic ERC-20/ERC-4626 and DEX-aggregator
-  blocks.
+- Supporting every protocol. v1 covers Morpho Blue, Aave v3 Core and the Aave
+  v4 Main Spoke (USDC/USDT), Pendle V2, 3Jane, Re Protocol and generic
+  ERC-20/ERC-4626 and DEX-aggregator blocks.
 - A public product. v1 is a personal tool. Hardening for strangers comes later.
 
 ---
@@ -173,12 +173,12 @@ A personal, non-upgradeable contract with a single owner. It's implemented in
 lines.
 
 ```solidity
-enum Source { BALANCE, MORPHO_COLLATERAL, MORPHO_BORROW_SHARES, MORPHO_DEBT_ASSETS }
+enum Source { BALANCE, MORPHO_COLLATERAL, MORPHO_BORROW_SHARES, MORPHO_DEBT_ASSETS, AAVE_V4_DEBT }
 
 struct Patch {
     uint32 offset;   // byte offset in `data` of the uint256 word to overwrite (>= 4)
     Source source;   // value read on-chain at execution time
-    bytes  args;     // (token, account) or (marketId, user)
+    bytes  args;     // (token, account), (marketId, user) or (spoke, reserveId, user)
     uint32 bps;      // scale, 10_000 = 100% (e.g. 10_001 = debt + 0.01% buffer)
 }
 
@@ -193,6 +193,8 @@ function assertMaxBalance(address token, address account, uint256 max) external 
 function assertNoDebt(bytes32 id, address user) external view;
 function assertMinHealth(bytes32 id, address user, uint256 minHealthWad) external view;
 function assertMinAaveHealth(address user, uint256 minHealthWad) external view; // Pool.getUserAccountData
+function assertMinAaveV4Health(address spoke, address user, uint256 minHealthWad) external view; // Spoke.getUserAccountData
+function assertNoAaveV4Debt(address spoke, uint256 reserveId, address user) external view; // Spoke.getUserTotalDebt == 0
 ```
 
 **Allowlist encoding:** one `uint256` rule per (target, selector).
@@ -236,7 +238,7 @@ one, revoke the old one in Access).
     a Pendle asset. Because of the recipient check, the Executor can't hand a
     PT or YT to an aggregator anyway.
   - **Aave:** only USDC and USDT can be approved to the Aave Pool, so Pendle
-    assets never reach it (§6.6).
+    assets never reach it (§6.6). The same holds for the Aave v4 Giver (§6.7).
 - **Ends empty:** `execute` sends the full balance of every `sweep` token to the
   owner at the end. The compiler always lists every token the plan touches, and
   the fork tests assert that the Executor ends with a zero balance.
@@ -524,6 +526,58 @@ with `ReserveFrozen` until Aave unfreezes. The Positions page reads the freeze
 flag live, and the simulation explains Aave reverts (frozen reserve, missing
 delegation or aToken approval).
 
+### 6.7 Aave v4 Main Spoke (USDC / USDT)
+
+Aave v4 (Hub & Spoke, live on Ethereum since 2026-03-30) only lets
+`onBehalfOf` itself, or a **governance-activated** position manager the user
+approved, act on a position: `supply`, `withdraw`, `borrow` and `repay` all
+check it.
+
+- **EIP-7702 mode (§5.4):** your account is the caller, so plans call the Spoke
+  directly — `Spoke.supply / withdraw / borrow / repay(reserveId, amount, you)`
+  — with no position managers or allowances. Supply and repay spend only what
+  the plan allots or brings in; the Spoke allowance is reset at the end.
+- **Executor:** it can't be activated, so it uses Aave's own managers: the
+  Giver (supply / repay for anyone, pulls from the caller) and the Taker
+  (withdraw / borrow within allowances you grant the Executor).
+
+| Block | EIP-7702 | Executor | Notes |
+|---|---|---|---|
+| `aaveV4.supply` | `approve(Spoke)` → `Spoke.supply` | `approve(Giver)` → `Giver.supplyOnBehalfOf(spoke, …)` | `all` = what the plan holds (allotted + received / the Executor's balance) |
+| `aaveV4.withdraw` | `Spoke.withdraw` | `Taker.withdrawOnBehalfOf(spoke, …)` | Funds go to the caller. `all` = `type(uint256).max`, which the Spoke caps at your supply |
+| `aaveV4.borrow` | `Spoke.borrow` | `Taker.borrowOnBehalfOf(spoke, …)` | Debt on your position, funds to the caller |
+| `aaveV4.repay` | `approve(Spoke)` → `Spoke.repay` | `approve(Giver)` → `Giver.repayOnBehalfOf(spoke, …)` | `all` patches the amount to your live debt (`AAVE_V4_DEBT` source: `Spoke.getUserTotalDebt`, drawn + premium; the Giver rejects `type(uint256).max`). `balance` repays up to what the plan holds (capped at the debt) |
+| `guard.aaveV4Health` | `assertMinAaveV4Health(spoke, owner, min)` | same | `Spoke.getUserAccountData(owner).healthFactor` |
+| `guard.aaveV4NoDebt` | `assertNoAaveV4Debt(spoke, reserveId, owner)` | same | |
+
+A Morpho flash loan or a swap's minimum output can be sized to `aaveV4Debt`
+(the same source), so a v4 position closes in one transaction like a v3 one.
+v4 has no aTokens or debt tokens: the simulation reports your v4 supply, debt
+and health factor after the plan.
+
+**Setup (optional card, all from your wallet):**
+`Spoke.setUsingAsCollateral(reserveId, true, you)` per reserve you borrow
+against — the only step under EIP-7702. With an Executor, also
+`Spoke.setUserPositionManager(Giver | Taker, true)` once and
+`Taker.approveBorrow / approveWithdraw(spoke, reserveId, executor, max)` per
+reserve; Access lists and revokes those allowances (`… , 0)`). The Giver lets
+anyone supply or repay for you, which can't hurt you.
+
+**Allowlist:** `Spoke.supply / withdraw / borrow / repay` with `onBehalfOf`
+(word 2) pinned, and Giver `supplyOnBehalfOf` / `repayOnBehalfOf` and Taker
+`withdrawOnBehalfOf` / `borrowOnBehalfOf` with `onBehalfOf` (word 3) pinned (the
+Spoke must be one Aave registered with the manager). Taker `approve*`, Spoke
+`setUserPositionManager` / `setUsingAsCollateral` have **no** rule: a plan can
+never grant v4 access. Only USDC and USDT can be approved to the Spoke or the
+Giver. Adding v4 changed `MainnetConfig`, so `CONFIG_VERSION` is 2 and the
+delegate's address moved (a new Ledger app build and authorization; no real
+device had delegated yet).
+
+**Status (2026-10-30):** every reserve on the Main Spoke (and on the Bluechip,
+USDG Pendle and Ethena Correlated Spokes) is frozen: repay and withdraw work,
+supply, borrow and enabling a new collateral revert with `ReserveFrozen`. The
+Positions page reads the flags live.
+
 ---
 
 ## 7. Templates (v1)
@@ -676,11 +730,12 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
 1. **Positions:** auto-detected Morpho positions for the EOA and the Executor:
    collateral, debt, HF, LTV/LLTV, PT maturity, YT balance, the underlying's
    redeemable liquidity. Each row has one-click actions: **Unwind**, **Partial**,
-   **Re-lever**, **Roll**. Below them, your Aave v3 USDC/USDT supply and debt,
-   the Aave health factor, and which reserves Aave has frozen.
+   **Re-lever**, **Roll**. Below them, your Aave v3 and Aave v4 (Main Spoke)
+   USDC/USDT supply and debt, each health factor, and which reserves Aave has
+   frozen.
 2. **Builder** (`#/builder`, built in M2):
-   - **Left: the block palette.** 20 blocks grouped as Wallet, Morpho, Aave,
-     Pendle, Swap and Guard.
+   - **Left: the block palette.** 26 blocks grouped as Wallet, Morpho, Aave v3,
+     Aave v4, Pendle, Swap and Guard.
      - **Search:** `/` focuses search, and Enter adds the top match. Title
        matches rank first, so "redeem sy" adds *Redeem SY*.
      - **Adding:** click a block to append it, or drag it to an exact spot.
@@ -714,7 +769,9 @@ blind-sign** it (Ethereum app → enable Blind signing). Mitigations:
      `setAuthorization(executor, true)` on Morpho, and approve the loop tokens
      to the Executor. That's roughly 3–6 Ledger transactions, done once.
      Optional Aave steps: credit delegation (for the Aave Borrow block) and
-     aEthUSDC/aEthUSDT approvals (for Withdraw), one per reserve.
+     aEthUSDC/aEthUSDT approvals (for Withdraw), one per reserve. Optional Aave
+     v4 steps (§6.7): approve the Giver and Taker on the Main Spoke, use a
+     supply as collateral, and Taker borrow / withdraw allowances per reserve.
    - **Revoke:** see §9.3. It's also on every screen, not just in Settings.
 
 ### 9.3 Executor access and revoke (always visible)
@@ -729,6 +786,8 @@ in one click.
     for each market), and for aEthUSDC / aEthUSDT.
   - Aave credit delegation: `borrowAllowance(you, executor)` on each variable
     debt token.
+  - Aave v4: `Taker.borrowAllowance / withdrawAllowance(spoke, reserveId, you,
+    executor)` per reserve.
   - It shows **"Executor access: ON"** (amber) with a count, or **"OFF"** (grey).
   - Clicking it opens the Access panel.
 - **Access panel:**
@@ -757,6 +816,8 @@ in one click.
     the Morpho authorization.
   - Aave credit delegation: each variable debt token →
     `approveDelegation(<executor>, 0)`. Not listed by Rabby or revoke.cash either.
+  - Aave v4 Taker allowances: Taker → `approveBorrow / approveWithdraw(spoke,
+    reserveId, <executor>, 0)`. Not listed by Rabby or revoke.cash either.
   - Token approvals: also listed in Rabby's Approvals page.
 - **After revoking,** templates show "Executor access is off" and offer
   **Re-enable** (the setup wizard's authorize and approve steps).
@@ -813,8 +874,10 @@ reviewed manually. **No address is trusted from an API.**
   PT-reUSD-10DEC2026 (PT, YT, SY); their Morpho markets; the Aave v3 Core Pool
   with the USDC and USDT aTokens and variable debt tokens (checked with
   `PoolAddressesProvider.getPool`, `Pool.getReserveAToken` /
-  `getReserveVariableDebtToken` and each token's `UNDERLYING_ASSET_ADDRESS`).
-  **All are supported:**
+  `getReserveVariableDebtToken` and each token's `UNDERLYING_ASSET_ADDRESS`); the
+  Aave v4 Main Spoke, Giver and Taker (from bgd-labs/aave-address-book, checked
+  with `Spoke.getReserve(id).underlying`, `Spoke.isPositionManagerActive` and
+  `Giver/Taker.isSpokeRegistered`). **All are supported:**
   - PT-USD3/USDC **A** (`0xf8c5…`) and **B** (`0xecab…`): both 86% LLTV, with
     different oracles.
   - PT-USD3/**USDT** (`0x37a5…`): 91.5% LLTV.
@@ -845,6 +908,7 @@ truth during simulation.
 | Malicious callback re-enters mid-plan | Transient reentrancy lock. Callbacks only run inner calls passed in by `execute` |
 | The standing Morpho authorization gets abused | Only the Executor holds it, and only the owner can drive the Executor. Callbacks are gated (§5.1). There's a one-click Revoke. The Executor is immutable, so new versions mean revoke-then-reauthorize |
 | The standing Aave credit delegation / aToken approval gets abused | Same as Morpho: only the owner drives the Executor; borrow `onBehalfOf` and withdraw `to` are pinned to the owner/Executor, debt tokens have no allowlist rule (no re-delegation), aTokens can only go back to the owner; optional, per reserve, revocable in Access |
+| The standing Aave v4 Taker allowances get abused | Same model: only the owner drives the Executor, `onBehalfOf` is pinned, the Executor can't grant or change v4 permissions (no rule for Taker `approve*` or Spoke `setUserPositionManager`); optional, per reserve, revocable in Access |
 | Funds left in the Executor | Final sweep plus an "ends empty" invariant |
 | Leftover approvals | Exact amounts, reset at the end. Permit2 with short expiry |
 | Bad quote or sandwich | On-chain `minOut` per swap or redeem. Private RPC. Simulation at the latest block |
@@ -869,7 +933,9 @@ loan always repaid), then an external review before moving significant size.
   `transferFrom` limited to the owner, Morpho receivers and `onBehalf` pinned,
   `setAuthorization` blocked from plans, patch bounds checked, Aave
   `onBehalfOf`/`to` pinned, aTokens only back to the owner, no credit
-  re-delegation, only USDC/USDT approvable to the Pool.
+  re-delegation, only USDC/USDT approvable to the Pool; Aave v4 `onBehalfOf`
+  pinned on the Giver and Taker, Taker allowances and Spoke position managers
+  never grantable from a plan, only USDC/USDT approvable to the Giver.
 - **Fork tests** (latest mainnet block, real positions impersonated):
   - `test/fork/PtUsd3Usdc.t.sol` (`pnpm test:fork`):
     - **Market A real position:** 597k PT, 447k USDC debt, HF 1.10. Fully
@@ -900,6 +966,16 @@ loan always repaid), then an external review before moving significant size.
     the Aave debt (repay all, pull + withdraw all aUSDC); USDT debt against USDC
     collateral repaid in part and then in full from the wallet; both Aave guards.
     The Executor ends with no aTokens (they aren't swept).
+  - `test/fork/AaveV4.t.sol` (`pnpm test:fork`; Main Spoke USDC unfrozen on the
+    fork through the SpokeConfigurator): Setup from the wallet (Giver + Taker,
+    collateral, Taker allowances), supply 100k + borrow 60k USDC via the
+    Giver/Taker, both v4 guards, then — re-frozen — a 30-day-old position closed
+    in one transaction with a Morpho flash loan of exactly the v4 debt (repay all
+    via the `AAVE_V4_DEBT` patch, withdraw all). Borrowing without a Taker
+    allowance reverts with `InsufficientBorrowAllowance`. EIP-7702: the
+    delegated account supplies 100k / borrows 60k on the Spoke itself (only the
+    allotted USDC spent, no position managers), then closes the same way; no
+    Spoke allowance is left behind.
 - **Compiler (M1):** golden tests from Plan JSON to calldata, checked against
   the Solidity `test/utils/Plans.sol` prototype.
 - **App unit tests** (`app/test/unit`, 15 tests, no network): patch offsets
@@ -921,7 +997,10 @@ loan always repaid), then an external review before moving significant size.
     transaction, then unwound on B with a flow assembled block by block. Aave
     (`aave.test.ts`): Setup incl. the Aave steps, open via Builder blocks, a
     frozen-reserve supply explained by the simulation, close via a flash loan
-    sized to the Aave debt, Access lists and revokes the delegations.
+    sized to the Aave debt, Access lists and revokes the delegations. Aave v4
+    (`aaveV4.test.ts`): the same end to end on the Main Spoke for both the
+    Executor (Giver / Taker, Taker allowances in Access) and EIP-7702 (Spoke
+    directly, collateral-only setup), with the v4 simulation readout.
   - **E2E:** builds the unwind from the palette, simulates, signs, and checks
     the position closed.
 - **Dev-fork lock:** dev-fork simulation runs snapshot, send and revert. Every
@@ -960,9 +1039,9 @@ loan always repaid), then an external review before moving significant size.
 ## 14. Decisions and open questions
 
 ### Decided (2026-10-30)
-1. **Lending venue:** Morpho Blue for the PT loops. Aave v3 Core (USDC/USDT)
-   is a second venue for Builder blocks; PT-USD3 and PT-reUSD aren't listed on
-   Aave.
+1. **Lending venue:** Morpho Blue for the PT loops. Aave v3 Core and the Aave
+   v4 Main Spoke (USDC/USDT) are further venues for Builder blocks; PT-USD3 and
+   PT-reUSD aren't listed on Aave.
 2. **Position ownership:** the simpler option. Positions stay under the EOA,
    with a one-time standing authorization for the Executor (§5.2).
 3. **YT coverage:** YT may not always cover the PT, so shortfall handling is a

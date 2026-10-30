@@ -53,6 +53,15 @@ export function SimSummary({ plan, sim, compact }: { plan: Plan; sim: Extract<Si
           <span>Aave v3 after: health {health(sim.aaveHealthAfter)}</span>
         </p>
       )}
+      {sim.aaveV4After && (
+        <p className="row small" data-testid="aave-v4-after">
+          <span>
+            Aave v4 after:{" "}
+            {sim.aaveV4After.reserves.map((r) => `${withSymbol(r.supplied, r.reserve.asset)} supplied, ${withSymbol(r.debt, r.reserve.asset)} debt · `)}
+            health {health(sim.aaveV4After.health)}
+          </span>
+        </p>
+      )}
       <p className="row small muted">
         <span>gas {sim.gasUsed.toLocaleString()}</span>
         <span>· simulated at block {String(sim.block)} ({sim.method})</span>

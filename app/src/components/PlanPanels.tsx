@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { decodeFunctionData, keccak256, type Abi } from "viem";
-import { aaveDebtTokenAbi, aavePoolAbi, erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../lib/abis";
+import { aaveDebtTokenAbi, aavePoolAbi, aaveV4GiverAbi, aaveV4SpokeAbi, aaveV4TakerAbi, erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../lib/abis";
 import type { Plan } from "../lib/compiler/types";
 import { label } from "../lib/registry";
 import { useApp } from "../state";
@@ -8,7 +8,7 @@ import { AddressLink, Card, Notice, SentLine, useSendTx } from "./common";
 
 export const MAX_SIM_AGE_BLOCKS = 3n;
 
-const KNOWN_ABIS: Abi[] = [executorAbi, morphoAbi, aavePoolAbi, aaveDebtTokenAbi, erc20Abi, ytAbi, syAbi];
+const KNOWN_ABIS: Abi[] = [executorAbi, morphoAbi, aavePoolAbi, aaveDebtTokenAbi, aaveV4GiverAbi, aaveV4TakerAbi, aaveV4SpokeAbi, erc20Abi, ytAbi, syAbi];
 
 function fnName(data: `0x${string}`): string {
   for (const abi of KNOWN_ABIS) {

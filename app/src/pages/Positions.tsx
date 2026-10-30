@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { parseUnits } from "viem";
 import { AaveCard } from "../components/AaveCard";
+import { AaveV4Card } from "../components/AaveV4Card";
 import { Card, Notice, ReUsdRiskNote } from "../components/common";
 import { health, pct, withSymbol } from "../format";
 import { go, usePoll } from "../hooks";
@@ -76,6 +77,7 @@ export function PositionsPage() {
         )}
       </Card>
       <AaveCard owner={owner} />
+      <AaveV4Card owner={owner} />
       <EnterCard ready={!!ready} depositCap={limits?.deposit} />
     </>
   );

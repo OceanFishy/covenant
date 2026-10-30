@@ -1,7 +1,7 @@
 {
   "chainId": 1,
   "verified": "2026-10-30",
-  "verification": "Each Pendle entry checked on-chain: YT.PT() == pt, YT.SY() == sy, YT.expiry(), PT/SY decimals(), SY.getTokensIn()/getTokensOut(), SY.yieldToken(). Morpho markets checked with Morpho.idToMarketParams(id). Aave: PoolAddressesProvider.getPool() == pool, Pool.getReserveAToken/getReserveVariableDebtToken(asset), and each token's UNDERLYING_ASSET_ADDRESS(). Keep in sync with contracts/config/MainnetConfig.sol.",
+  "verification": "Each Pendle entry checked on-chain: YT.PT() == pt, YT.SY() == sy, YT.expiry(), PT/SY decimals(), SY.getTokensIn()/getTokensOut(), SY.yieldToken(). Morpho markets checked with Morpho.idToMarketParams(id). Aave: PoolAddressesProvider.getPool() == pool, Pool.getReserveAToken/getReserveVariableDebtToken(asset), and each token's UNDERLYING_ASSET_ADDRESS(). Aave v4: addresses from bgd-labs/aave-address-book (AaveV4Ethereum), Spoke.getReserve(id).underlying, Spoke.isPositionManagerActive(giver/taker), Giver/Taker.isSpokeRegistered(spoke). Keep in sync with contracts/config/MainnetConfig.sol.",
   "tokens": {
     "USDC": {
       "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -78,6 +78,16 @@
         "variableDebtToken": "0x6df1C1E379bC5a00a7b4C6e67A203333772f45A8",
         "variableDebtTokenSymbol": "variableDebtEthUSDT"
       }
+    }
+  },
+  "aaveV4": {
+    "notes": "Aave v4 Main Spoke (Core Hub). The Executor acts through Aave's Giver (supply/repay on behalf, pulls from the caller, repay capped at the debt and never max) and Taker (withdraw/borrow on behalf, up to allowances the owner grants the Executor per reserve) position managers; the owner approves both on the Spoke once. Since 2026-10 every Main Spoke reserve is frozen: repay and withdraw work, supply and borrow revert (ReserveFrozen) until it is unfrozen.",
+    "mainSpoke": "0x94e7A5dCbE816e498b89aB752661904E2F56c485",
+    "giver": "0x17A54b8d6D9C68e7fa1C7112AC998EA1BA51d11e",
+    "taker": "0x6c044c0D3801499bCAbfAd458B70880bc518e9F7",
+    "reserves": {
+      "USDC": { "reserveId": 7 },
+      "USDT": { "reserveId": 8 }
     }
   },
   "pendle": {

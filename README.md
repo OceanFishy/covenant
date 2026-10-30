@@ -7,8 +7,12 @@ signature. Supported: PT-USD3 / USDC markets A and B, PT-USD3 / USDT, and PT-reU
 Aave v3 Core (USDC / USDT) is available as Builder blocks: supply, withdraw,
 borrow, repay, and health / no-debt guards. That's enough to close an Aave
 position in one transaction with a Morpho flash loan sized to the Aave debt.
-Aave has frozen every v3 Ethereum reserve (LTV 0) for now, so supply and borrow
-revert until it unfreezes them. Repay and withdraw work.
+The Aave v4 Main Spoke (USDC / USDT) has the same blocks. In EIP-7702 mode your
+account calls the Spoke itself; an Executor goes through Aave's own Giver
+(supply / repay) and Taker (withdraw / borrow) position managers, since v4 only
+lets you or governance-activated managers act for you. Aave has frozen
+every v3 Ethereum reserve (LTV 0) and every v4 Main Spoke reserve for now, so
+supply and borrow revert until it unfreezes them. Repay and withdraw work.
 
 - Spec: [`docs/SPEC.md`](docs/SPEC.md)
 - Verified mainnet addresses: [`registry/mainnet.json`](registry/mainnet.json)
@@ -20,8 +24,8 @@ revert until it unfreezes them. Repay and withdraw work.
 - **M1 built:** the app (Positions, Review & Sign, Setup, Access/Revoke). It's
   tested with a TypeScript plan compiler on a mainnet fork, with `eth_simulateV1`
   against live mainnet, and end to end in a browser with a mock Rabby.
-- **M2 built:** the Builder (`#/builder`). Assemble any flow from 20 blocks (Morpho,
-  Aave, Pendle mint/redeem, stablecoin swaps, guards, flash loans), or start from a
+- **M2 built:** the Builder (`#/builder`). Assemble any flow from 26 blocks (Morpho,
+  Aave v3, Aave v4, Pendle mint/redeem, stablecoin swaps, guards, flash loans), or start from a
   template (unwind, deleverage, partial, max unwind, enter, move a loop A → B). Then simulate
   and sign. Flows can be saved, exported or shared.
 - **EIP-7702 mode built (optional, Nano S Plus):** your account itself runs plans
@@ -50,7 +54,10 @@ Before you sign anything:
    - Authorize it on Morpho and approve YT-USD3. That's done once.
    - Optional, for the Aave blocks: allow the Executor to borrow USDC/USDT for
      you (credit delegation) and approve aEthUSDC/aEthUSDT (withdraw).
-   - An Executor deployed before Aave support fails verification. Deploy a new
+   - Optional, for the Aave v4 blocks: approve Aave's Giver and Taker on the Main
+     Spoke, use a supply as collateral, and give the Executor Taker borrow /
+     withdraw allowances per reserve.
+   - An Executor deployed before Aave v4 support fails verification. Deploy a new
      one and revoke the old one in Access.
    - It can all be revoked from **Access**. The badge in the header shows
      whether any Executor can act for you.
@@ -79,14 +86,16 @@ node --env-file=../.env scripts/ledger7702.mjs revoke --rpc https://rpc.flashbot
 
 The app detects the delegation and switches to it (Setup shows "Your account runs
 plans itself"). Any contract change moves the delegate's address, which needs a
-new app build and a new authorization.
+new app build and a new authorization. Aave v4 support moved it (allowlist v2):
+rebuild the app with `./ledger/build-app.sh --load` before delegating. For Aave
+v4 in this mode, Setup only asks to enable a supply as collateral.
 
 ## Tests
 
 ```sh
 export MAINNET_RPC_URL=...      # fork + simulation tests
 pnpm test:unit                  # contract allowlist / access (no network)
-pnpm test:fork                  # contracts on a fork: USDC markets A and B, Aave v3, EIP-7702 mode
+pnpm test:fork                  # contracts on a fork: USDC markets A and B, Aave v3, Aave v4, EIP-7702 mode
 pnpm test:fork:aggregator       # contracts on a fork: USDT and PT-reUSD markets, live 0x/KyberSwap routes
 cd app
 pnpm test                       # app unit tests (no network)
@@ -116,7 +125,7 @@ app/src/lib/compiler/                  TypeScript plan compiler (Call/Patch enco
 app/src/lib/planner.ts                 picks full unwind / deleverage / partial from YT coverage
 app/src/lib/simulate.ts                eth_simulateV1 (mainnet) or snapshot/revert (local fork)
 app/src/lib/access.ts                  Executor permissions + revoke transactions
-app/src/lib/aave.ts                    Aave v3 account reader (supply, debt, health, frozen reserves)
+app/src/lib/aave.ts                    Aave v3 + v4 account readers (supply, debt, health, frozen reserves)
 app/src/lib/mev.ts                     MEV-protected RPCs + Flashbots routing check
 app/src/lib/builder/                   Builder blocks, catalog, validation, compiler, templates, storage
 app/src/pages/                         Positions, Builder, Review, Setup, Access

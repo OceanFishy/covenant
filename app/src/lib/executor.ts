@@ -10,6 +10,8 @@ import {
 } from "viem";
 import {
   aaveDebtTokenAbi,
+  aaveV4SpokeAbi,
+  aaveV4TakerAbi,
   DELEGATE,
   DELEGATE_FACTORY,
   DELEGATE_SALT,
@@ -21,7 +23,7 @@ import {
   morphoAbi,
   type ExecutorBytecode,
 } from "./abis";
-import { AAVE_POOL, AAVE_RESERVES, KYBER_ROUTER, MORPHO, SERIES, TOKENS, ZEROX_ALLOWANCE_HOLDER, label } from "./registry";
+import { AAVE_POOL, AAVE_RESERVES, AAVE_V4, AAVE_V4_RESERVES, KYBER_ROUTER, MORPHO, SERIES, TOKENS, ZEROX_ALLOWANCE_HOLDER, label } from "./registry";
 
 // ---------------------------------------------------------------- local storage (per owner)
 
@@ -245,4 +247,52 @@ export function aaveSetupSteps(executor: Address): SetupStep[] {
         (await c.readContract({ address: r.aToken.address, abi: erc20Abi, functionName: "allowance", args: [owner, ex] })) > 0n,
     },
   ]);
+}
+
+/**
+ * Optional, only for the Aave v4 blocks. A v4 Spoke only lets you or a governance-activated
+ * position manager act on your position. Under EIP-7702 (`executor` = `owner`) your account is the
+ * caller, so it only needs a supply enabled as collateral to borrow against it. A deployed
+ * Executor goes through Aave's own managers: approve the Giver (supply / repay) and the Taker
+ * (withdraw / borrow) on the Main Spoke once, then give the Executor Taker allowances per reserve.
+ */
+export function aaveV4SetupSteps(owner: Address, executor: Address): SetupStep[] {
+  const { spoke, giver, taker } = AAVE_V4;
+  const collateral = (r: (typeof AAVE_V4_RESERVES)[number]): SetupStep => ({
+    id: `aave4-collateral-${r.symbol}`,
+    title: `Use your Aave v4 ${r.symbol} supply as collateral (setUsingAsCollateral) — needed to borrow against it`,
+    tx: { to: spoke, data: encodeFunctionData({ abi: aaveV4SpokeAbi, functionName: "setUsingAsCollateral", args: [r.reserveId, true, owner] }) },
+    isDone: async (c, o) => (await c.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "getUserReserveStatus", args: [r.reserveId, o] }))[0],
+  });
+  if (owner.toLowerCase() === executor.toLowerCase()) return AAVE_V4_RESERVES.map(collateral);
+  const manager = (pm: Address, what: string): SetupStep => ({
+    id: `aave4-pm-${pm}`,
+    title: `Approve Aave's ${label(pm).replace("Aave v4 ", "")} as a position manager on the Aave v4 Main Spoke — ${what}`,
+    tx: { to: spoke, data: encodeFunctionData({ abi: aaveV4SpokeAbi, functionName: "setUserPositionManager", args: [pm, true] }) },
+    isDone: (c, o) => c.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "isPositionManager", args: [o, pm] }),
+  });
+  return [
+    manager(giver, "lets the Executor supply and repay for you"),
+    manager(taker, "lets the Executor withdraw and borrow within the allowances below"),
+    ...AAVE_V4_RESERVES.flatMap((r): SetupStep[] => [
+      collateral(r),
+      ...(["Borrow", "Withdraw"] as const).map(
+        (kind): SetupStep => ({
+          id: `aave4-${kind.toLowerCase()}-${r.symbol}`,
+          title: `Allow the Executor to ${kind.toLowerCase()} ${r.symbol} on Aave v4 for you (Taker approve${kind}) — for the Aave v4 “${kind}” block`,
+          tx: {
+            to: taker,
+            data: encodeFunctionData({ abi: aaveV4TakerAbi, functionName: `approve${kind}`, args: [spoke, r.reserveId, executor, maxUint256] }),
+          },
+          isDone: async (c, o, ex) =>
+            (await c.readContract({
+              address: taker,
+              abi: aaveV4TakerAbi,
+              functionName: kind === "Borrow" ? "borrowAllowance" : "withdrawAllowance",
+              args: [spoke, r.reserveId, o, ex],
+            })) > 0n,
+        }),
+      ),
+    ]),
+  ];
 }

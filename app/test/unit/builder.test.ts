@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { decodeFunctionData, encodeErrorResult, getAddress, maxUint256, type PublicClient } from "viem";
-import { aaveErrorsAbi, aavePoolAbi, erc20Abi, executorAbi } from "../../src/lib/abis";
+import { aaveErrorsAbi, aavePoolAbi, aaveV4ErrorsAbi, aaveV4GiverAbi, aaveV4SpokeAbi, aaveV4TakerAbi, erc20Abi, executorAbi } from "../../src/lib/abis";
 import { newId } from "../../src/lib/builder/catalog";
 import { compileFlow, validate } from "../../src/lib/builder/compile";
 import { flowFromParam, flowToHash } from "../../src/lib/builder/storage";
 import { enterFlow, partialFlow, unwindFlow } from "../../src/lib/builder/templates";
 import type { Block } from "../../src/lib/builder/types";
 import { enter, flashUnwind, partialUnwind } from "../../src/lib/compiler/plans";
-import { arg, balancePatch } from "../../src/lib/compiler/encode";
+import { aaveV4DebtPatch, arg, balancePatch } from "../../src/lib/compiler/encode";
 import type { PositionView } from "../../src/lib/positions";
 import { decodeRevert } from "../../src/lib/simulate";
-import { AAVE_POOL, AAVE_RESERVES, MARKETS, SERIES, TOKENS } from "../../src/lib/registry";
+import { AAVE_POOL, AAVE_RESERVES, AAVE_V4, AAVE_V4_RESERVES, MARKETS, SERIES, TOKENS } from "../../src/lib/registry";
 
 const [A] = MARKETS;
 const owner = getAddress("0x00000000000000000000000000000000000000aa");
@@ -127,14 +127,73 @@ describe("Aave blocks", () => {
 
   it("only USDC and USDT reserves are accepted", () => {
     const bad = blocks({ type: "aaveSupply", asset: TOKENS.USD3.address, amount: { kind: "balance" } });
-    expect(validate(bad)[0]).toMatchObject({ level: "error", message: "only USDC and USDT are supported on Aave" });
+    expect(validate(bad)[0]).toMatchObject({ level: "error", message: "only USDC and USDT are supported on Aave v3" });
+  });
+});
+
+describe("Aave v4 blocks", () => {
+  const r = AAVE_V4_RESERVES[0]; // USDC, Main Spoke reserve 7
+  type NoId = Block extends infer B ? (B extends Block ? Omit<B, "id"> : never) : never;
+  const blocks = (...list: NoId[]) => list.map((x, i) => ({ ...x, id: `v${i}` }) as Block);
+
+  it("repay all goes through the Giver with the live v4 debt patched in (the Giver rejects max)", async () => {
+    const plan = await compileFlow(blocks({ type: "aaveV4Repay", asset: r.asset, amount: { kind: "allDebt" } }), ctx);
+    const repay = plan.calls[1];
+    expect(repay.target).toBe(AAVE_V4.giver);
+    expect(decodeFunctionData({ abi: aaveV4GiverAbi, data: repay.data }).args).toEqual([AAVE_V4.spoke, r.reserveId, 0n, owner]);
+    expect(repay.patches).toEqual([aaveV4DebtPatch(arg(2), AAVE_V4.spoke, r.reserveId, owner)]);
+  });
+
+  it("withdraw all asks the Taker for max, which the Spoke caps at the supply", async () => {
+    const plan = await compileFlow(blocks({ type: "aaveV4Withdraw", asset: r.asset, amount: { kind: "supplied" } }), ctx);
+    expect(plan.calls).toHaveLength(1);
+    expect(plan.calls[0].target).toBe(AAVE_V4.taker);
+    expect(decodeFunctionData({ abi: aaveV4TakerAbi, data: plan.calls[0].data }).args).toEqual([AAVE_V4.spoke, r.reserveId, maxUint256, owner]);
+  });
+
+  it("a Morpho flash loan can be sized to the v4 debt, and the plan reports the v4 reserves", async () => {
+    const plan = await compileFlow(
+      blocks({
+        type: "flashLoan",
+        token: r.asset,
+        amount: { kind: "aaveV4Debt", asset: r.asset, bps: 10_010 },
+        children: blocks({ type: "aaveV4Repay", asset: r.asset, amount: { kind: "allDebt" } }),
+      }),
+      ctx,
+    );
+    expect(plan.calls[0].patches).toEqual([aaveV4DebtPatch(arg(1), AAVE_V4.spoke, r.reserveId, owner, 10_010)]);
+    expect(plan.aaveV4).toEqual([r]);
+    expect(plan.aave).toBe(false);
+  });
+
+  it("EIP-7702: your account calls the Spoke itself (no Giver / Taker); repay all is the live debt", async () => {
+    const self = { ...ctx, executor: owner };
+    const plan = await compileFlow(
+      blocks(
+        { type: "aaveV4Repay", asset: r.asset, amount: { kind: "allDebt" } },
+        { type: "aaveV4Withdraw", asset: r.asset, amount: { kind: "supplied" } },
+      ),
+      self,
+    );
+    const [approveCall, repay, withdraw] = plan.calls;
+    expect(decodeFunctionData({ abi: erc20Abi, data: approveCall.data }).args[0]).toBe(AAVE_V4.spoke);
+    expect(repay.target).toBe(AAVE_V4.spoke);
+    expect(decodeFunctionData({ abi: aaveV4SpokeAbi, data: repay.data })).toMatchObject({ functionName: "repay", args: [r.reserveId, 0n, owner] });
+    expect(repay.patches).toEqual([aaveV4DebtPatch(arg(1), AAVE_V4.spoke, r.reserveId, owner)]);
+    expect(decodeFunctionData({ abi: aaveV4SpokeAbi, data: withdraw.data })).toMatchObject({ functionName: "withdraw", args: [r.reserveId, maxUint256, owner] });
   });
 });
 
 it("explains Aave reverts a plan can fix", () => {
   const reason = encodeErrorResult({ abi: aaveErrorsAbi, errorName: "InsufficientBorrowAllowance", args: [executor, 0n, 5n] });
   const err = encodeErrorResult({ abi: executorAbi, errorName: "CallFailed", args: [0n, AAVE_POOL, reason] });
-  expect(decodeRevert(err)).toContain("Setup → Aave");
+  expect(decodeRevert(err)).toContain("Setup → Aave v3");
+});
+
+it("explains Aave v4 reverts a plan can fix", () => {
+  const reason = encodeErrorResult({ abi: aaveV4ErrorsAbi, errorName: "InsufficientBorrowAllowance", args: [0n, 5n] });
+  const err = encodeErrorResult({ abi: executorAbi, errorName: "CallFailed", args: [0n, AAVE_V4.taker, reason] });
+  expect(decodeRevert(err)).toContain("Setup → Aave v4");
 });
 
 it("share links round-trip a flow", () => {

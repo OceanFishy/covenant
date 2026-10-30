@@ -130,3 +130,52 @@ export const aaveErrorsAbi = parseAbi([
   "error InsufficientBorrowAllowance(address delegatee, uint256 allowance, uint256 amount)",
   "error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed)",
 ]);
+
+const v4AccountData =
+  "(uint256 riskPremium, uint256 avgCollateralFactor, uint256 healthFactor, uint256 totalCollateralValue, uint256 totalDebtValueRay, uint256 activeCollateralCount, uint256 borrowCount)";
+
+export const aaveV4SpokeAbi = parseAbi([
+  "function getUserTotalDebt(uint256 reserveId, address user) view returns (uint256)",
+  "function getUserSuppliedAssets(uint256 reserveId, address user) view returns (uint256)",
+  `function getUserAccountData(address user) view returns ${v4AccountData}`,
+  "function getUserReserveStatus(uint256 reserveId, address user) view returns (bool usingAsCollateral, bool borrowing)",
+  "function getReserveConfig(uint256 reserveId) view returns ((uint24 collateralRisk, bool paused, bool frozen, bool borrowable, bool receiveSharesEnabled))",
+  "function setUserPositionManager(address positionManager, bool approve)",
+  "function isPositionManager(address user, address positionManager) view returns (bool)",
+  "function setUsingAsCollateral(uint256 reserveId, bool usingAsCollateral, address onBehalfOf)",
+  // Caller must be onBehalfOf (EIP-7702: your account) or its position manager.
+  "function supply(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+  "function withdraw(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+  "function borrow(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+  "function repay(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+]);
+
+export const aaveV4GiverAbi = parseAbi([
+  "function supplyOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+  "function repayOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+]);
+
+export const aaveV4TakerAbi = parseAbi([
+  "function approveWithdraw(address spoke, uint256 reserveId, address spender, uint256 amount)",
+  "function approveBorrow(address spoke, uint256 reserveId, address spender, uint256 amount)",
+  "function withdrawOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+  "function borrowOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)",
+  "function withdrawAllowance(address spoke, uint256 reserveId, address owner, address spender) view returns (uint256)",
+  "function borrowAllowance(address spoke, uint256 reserveId, address owner, address spender) view returns (uint256)",
+]);
+
+/** Aave v4 Spoke / position manager errors (ReserveFrozen / ReservePaused decode via aaveErrorsAbi). */
+export const aaveV4ErrorsAbi = parseAbi([
+  "error Unauthorized()",
+  "error ReserveNotBorrowable()",
+  "error ReserveNotListed()",
+  "error HealthFactorBelowThreshold()",
+  "error ReserveNotEnabledAsCollateral()",
+  "error ReserveNotSupplied()",
+  "error ReserveNotBorrowed()",
+  "error MaximumUserReservesExceeded()",
+  "error InsufficientWithdrawAllowance(uint256 allowance, uint256 required)",
+  "error InsufficientBorrowAllowance(uint256 allowance, uint256 required)",
+  "error RepayOnBehalfMaxUintNotAllowed()",
+  "error SpokeNotRegistered()",
+]);

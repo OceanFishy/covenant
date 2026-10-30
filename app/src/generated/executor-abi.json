@@ -37,6 +37,53 @@
       "inputs": [
         {
           "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "reserveId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "debt",
+          "type": "uint256"
+        }
+      ],
+      "name": "AaveV4DebtRemaining",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "health",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "min",
+          "type": "uint256"
+        }
+      ],
+      "name": "AaveV4HealthTooLow",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
           "name": "target",
           "type": "address"
         },
@@ -405,6 +452,29 @@
       "inputs": [
         {
           "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "minHealth",
+          "type": "uint256"
+        }
+      ],
+      "name": "assertMinAaveV4Health",
+      "outputs": [],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
           "name": "token",
           "type": "address"
         },
@@ -461,6 +531,29 @@
         }
       ],
       "name": "assertMinOwned",
+      "outputs": [],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "spoke",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "reserveId",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "user",
+          "type": "address"
+        }
+      ],
+      "name": "assertNoAaveV4Debt",
       "outputs": [],
       "stateMutability": "view",
       "type": "function"

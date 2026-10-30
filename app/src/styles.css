@@ -165,6 +165,7 @@ input.short { width: 70px; }
 .template:last-child { border-bottom: none; }
 .g-wallet { border-left-color: #8a8f99; }
 .g-morpho { border-left-color: #3355dd; }
+.g-aave { border-left-color: #b6509e; }
 .g-pendle { border-left-color: #1f9d74; }
 .g-swap { border-left-color: #c77d12; }
 .g-guard { border-left-color: #b42318; }

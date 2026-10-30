@@ -2,7 +2,7 @@ import type { Address } from "viem";
 import { MARKETS, SERIES, TOKENS } from "../registry";
 import type { Block, BlockType } from "./types";
 
-export type Group = "Wallet" | "Morpho" | "Aave" | "Pendle" | "Swap" | "Guard";
+export type Group = "Wallet" | "Morpho" | "Aave v3" | "Aave v4" | "Pendle" | "Swap" | "Guard";
 
 export type BlockDef = {
   type: BlockType;
@@ -110,35 +110,67 @@ export const CATALOG: BlockDef[] = [
   },
   {
     type: "aaveSupply",
-    title: "Supply to Aave",
-    group: "Aave",
+    title: "Supply to Aave v3",
+    group: "Aave v3",
     hint: "Supply USDC / USDT from the Executor to Aave v3 for you",
     keywords: "aave v3 supply deposit lend",
     create: (id) => ({ id, type: "aaveSupply", asset: USDC, amount: { kind: "balance" } }),
   },
   {
     type: "aaveWithdraw",
-    title: "Withdraw from Aave",
-    group: "Aave",
+    title: "Withdraw from Aave v3",
+    group: "Aave v3",
     hint: "Pull your aUSDC / aUSDT and withdraw it into the Executor (needs the aToken approval)",
     keywords: "aave v3 withdraw redeem atoken",
     create: (id) => ({ id, type: "aaveWithdraw", asset: USDC, amount: { kind: "supplied" } }),
   },
   {
     type: "aaveBorrow",
-    title: "Borrow on Aave",
-    group: "Aave",
+    title: "Borrow on Aave v3",
+    group: "Aave v3",
     hint: "Borrow USDC / USDT for you, into the Executor (needs credit delegation)",
     keywords: "aave v3 borrow loan",
     create: (id) => ({ id, type: "aaveBorrow", asset: USDC, amount: { kind: "fixed", value: "0" } }),
   },
   {
     type: "aaveRepay",
-    title: "Repay Aave debt",
-    group: "Aave",
-    hint: "Repay your Aave debt from the Executor (all of it exactly, or an amount)",
+    title: "Repay Aave v3 debt",
+    group: "Aave v3",
+    hint: "Repay your Aave v3 debt from the Executor (all of it exactly, or an amount)",
     keywords: "aave v3 repay loan debt",
     create: (id) => ({ id, type: "aaveRepay", asset: USDC, amount: { kind: "allDebt" } }),
+  },
+  {
+    type: "aaveV4Supply",
+    title: "Supply to Aave v4",
+    group: "Aave v4",
+    hint: "Supply USDC / USDT from the Executor to the Aave v4 Main Spoke for you (via Aave's Giver)",
+    keywords: "aave v4 supply deposit lend spoke",
+    create: (id) => ({ id, type: "aaveV4Supply", asset: USDC, amount: { kind: "balance" } }),
+  },
+  {
+    type: "aaveV4Withdraw",
+    title: "Withdraw from Aave v4",
+    group: "Aave v4",
+    hint: "Withdraw your supply into the Executor (via Aave's Taker; needs your withdraw allowance)",
+    keywords: "aave v4 withdraw redeem spoke",
+    create: (id) => ({ id, type: "aaveV4Withdraw", asset: USDC, amount: { kind: "supplied" } }),
+  },
+  {
+    type: "aaveV4Borrow",
+    title: "Borrow on Aave v4",
+    group: "Aave v4",
+    hint: "Borrow USDC / USDT for you, into the Executor (via Aave's Taker; needs your borrow allowance)",
+    keywords: "aave v4 borrow loan spoke",
+    create: (id) => ({ id, type: "aaveV4Borrow", asset: USDC, amount: { kind: "fixed", value: "0" } }),
+  },
+  {
+    type: "aaveV4Repay",
+    title: "Repay Aave v4 debt",
+    group: "Aave v4",
+    hint: "Repay your Aave v4 debt from the Executor (all of it exactly, or an amount)",
+    keywords: "aave v4 repay loan debt spoke",
+    create: (id) => ({ id, type: "aaveV4Repay", asset: USDC, amount: { kind: "allDebt" } }),
   },
   {
     type: "guardNoDebt",
@@ -166,19 +198,35 @@ export const CATALOG: BlockDef[] = [
   },
   {
     type: "guardAaveNoDebt",
-    title: "Check: no Aave debt",
+    title: "Check: no Aave v3 debt",
     group: "Guard",
-    hint: "Revert everything if any Aave debt is left in a token",
+    hint: "Revert everything if any Aave v3 debt is left in a token",
     keywords: "guard assert aave debt",
     create: (id) => ({ id, type: "guardAaveNoDebt", asset: USDC }),
   },
   {
     type: "guardAaveHealth",
-    title: "Check: Aave health factor",
+    title: "Check: Aave v3 health factor",
     group: "Guard",
-    hint: "Revert everything if your Aave health factor ends below a minimum",
+    hint: "Revert everything if your Aave v3 health factor ends below a minimum",
     keywords: "guard assert aave health hf",
     create: (id) => ({ id, type: "guardAaveHealth", min: "1.1" }),
+  },
+  {
+    type: "guardAaveV4NoDebt",
+    title: "Check: no Aave v4 debt",
+    group: "Guard",
+    hint: "Revert everything if any Aave v4 debt is left in a token",
+    keywords: "guard assert aave v4 debt",
+    create: (id) => ({ id, type: "guardAaveV4NoDebt", asset: USDC }),
+  },
+  {
+    type: "guardAaveV4Health",
+    title: "Check: Aave v4 health factor",
+    group: "Guard",
+    hint: "Revert everything if your Aave v4 health factor ends below a minimum",
+    keywords: "guard assert aave v4 health hf",
+    create: (id) => ({ id, type: "guardAaveV4Health", min: "1.1" }),
   },
 ];
 

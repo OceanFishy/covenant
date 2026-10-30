@@ -23,7 +23,7 @@ import { useApp } from "../state";
 
 type Sim = { plan: Plan; sim: Extract<SimulationResult, { ok: true }>; swaps: Record<string, Swap> };
 
-const GROUPS: Group[] = ["Wallet", "Morpho", "Aave", "Pendle", "Swap", "Guard"];
+const GROUPS: Group[] = ["Wallet", "Morpho", "Aave v3", "Aave v4", "Pendle", "Swap", "Guard"];
 const EMPTY: Flow = { version: 1, name: "Untitled flow", blocks: [] };
 
 type DragData = { kind: "new"; type: Block["type"] } | { kind: "move"; id: string };
@@ -292,7 +292,7 @@ export function BuilderPage({ params }: { params: URLSearchParams }) {
               {items.map((d) => (
                 <button
                   key={d.type}
-                  className={`palette-item g-${g.toLowerCase()}`}
+                  className={`palette-item g-${g.split(" ")[0].toLowerCase()}`}
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData("application/x-covenant-block", JSON.stringify({ kind: "new", type: d.type } satisfies DragData))}
                   onClick={() => add(d)}
@@ -455,7 +455,7 @@ function BlockCard(props: {
   const d = def(b.type);
   return (
     <div
-      className={`block g-${d.group.toLowerCase()} ${props.selected ? "selected" : ""}`}
+      className={`block g-${d.group.split(" ")[0].toLowerCase()} ${props.selected ? "selected" : ""}`}
       draggable
       onDragStart={(e) => {
         e.stopPropagation();

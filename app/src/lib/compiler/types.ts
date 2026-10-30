@@ -1,5 +1,5 @@
 import type { Address, Hex } from "viem";
-import type { Market } from "../registry";
+import type { AaveV4Reserve, Market } from "../registry";
 
 /** Mirrors CovenantCore.Source. */
 export enum Source {
@@ -9,6 +9,8 @@ export enum Source {
   MORPHO_DEBT_ASSETS = 3,
   /** What the plan itself holds of a token (the Executor's balance; under 7702, allotted + received). */
   OWNED = 4,
+  /** The owner's live Aave v4 debt on a Spoke reserve (drawn + premium). */
+  AAVE_V4_DEBT = 5,
 }
 
 /** Mirrors CovenantExecutor.Patch: overwrite the uint256 at `offset` in `data` at execution time. */
@@ -56,4 +58,9 @@ export type Plan = {
   tokens?: Address[];
   /** The plan touches the owner's Aave account: simulation reports the Aave health factor after. */
   aave?: boolean;
+  /**
+   * Aave v4 Main Spoke reserves the plan touches (empty when only the account health is checked):
+   * simulation reports their supply, debt and the v4 health factor after. Absent: no v4.
+   */
+  aaveV4?: AaveV4Reserve[];
 };

@@ -6,10 +6,10 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { aaveErrorsAbi, aavePoolAbi, erc20Abi, executorAbi, morphoAbi } from "./abis";
+import { aaveErrorsAbi, aavePoolAbi, aaveV4ErrorsAbi, aaveV4SpokeAbi, erc20Abi, executorAbi, morphoAbi } from "./abis";
 import type { Plan } from "./compiler/types";
 import { withChainLock } from "./chain";
-import { AAVE_POOL, MORPHO, label, tokenInfo, type Market } from "./registry";
+import { AAVE_POOL, AAVE_V4, MORPHO, label, tokenInfo, type AaveV4Reserve, type Market } from "./registry";
 
 export type BalanceChange = { token: Address; symbol: string; decimals: number; before: bigint; after: bigint };
 
@@ -29,6 +29,8 @@ export type SimulationResult =
       positions: PositionAfter[];
       /** The owner's Aave health factor after (WAD; max = no debt), when the plan touches Aave. */
       aaveHealthAfter?: bigint;
+      /** The owner's Aave v4 Main Spoke health (WAD) and supply / debt of the reserves the plan touches. */
+      aaveV4After?: { health: bigint; reserves: { reserve: AaveV4Reserve; supplied: bigint; debt: bigint }[] };
       method: "eth_simulateV1" | "dev-fork";
     }
   | { ok: false; block: bigint; error: string; revertData?: Hex; method: "eth_simulateV1" | "dev-fork" };
@@ -67,20 +69,33 @@ export function decodeRevert(data: Hex | undefined, depth = 0): string {
 
 const AAVE_HINTS: Record<string, string> = {
   ReserveFrozen: " (Aave governance has frozen this reserve: supply and borrow are disabled, repay and withdraw still work)",
-  InsufficientBorrowAllowance: " (the Executor can't borrow for you yet: Setup → Aave → allow it to borrow)",
-  ERC20InsufficientAllowance: " (the Executor can't pull your aToken yet: Setup → Aave → approve the aToken)",
+  InsufficientBorrowAllowance: " (the Executor can't borrow for you yet: Setup → Aave v3 → allow it to borrow)",
+  ERC20InsufficientAllowance: " (the Executor can't pull your aToken yet: Setup → Aave v3 → approve the aToken)",
   UserHasAssetWithZeroLtv: " (Aave set an LTV of 0 on one of your collaterals: withdraw that asset or repay first)",
 };
 
-/** Aave v3 Pool / token custom errors, with a hint for the ones a plan can fix. */
+const AAVE_V4_HINTS: Record<string, string> = {
+  Unauthorized: " (Aave's Giver / Taker isn't your position manager yet: Setup → Aave v4)",
+  InsufficientBorrowAllowance: " (the Executor can't borrow this for you yet: Setup → Aave v4 → allow it to borrow)",
+  InsufficientWithdrawAllowance: " (the Executor can't withdraw this for you yet: Setup → Aave v4 → allow it to withdraw)",
+  ReserveNotEnabledAsCollateral: " (use the supply as collateral first: Setup → Aave v4)",
+};
+
+/** Aave v3 and v4 custom errors (v3's ABI first: shared ones like ReserveFrozen decode there), with hints. */
 function decodeAaveRevert(data: Hex): string | undefined {
-  try {
-    const e = decodeErrorResult({ abi: aaveErrorsAbi, data });
-    const a = (e.args ?? []) as readonly unknown[];
-    return `Aave: ${e.errorName}${a.length ? `(${a.map(String).join(", ")})` : ""}${AAVE_HINTS[e.errorName] ?? ""}`;
-  } catch {
-    return undefined;
+  for (const [abi, name, hints] of [
+    [aaveErrorsAbi, "Aave", AAVE_HINTS],
+    [aaveV4ErrorsAbi, "Aave v4", AAVE_V4_HINTS],
+  ] as const) {
+    try {
+      const e = decodeErrorResult({ abi, data });
+      const a = (e.args ?? []) as readonly unknown[];
+      return `${name}: ${e.errorName}${a.length ? `(${a.map(String).join(", ")})` : ""}${hints[e.errorName] ?? ""}`;
+    } catch {
+      /* not this protocol's error */
+    }
   }
+  return undefined;
 }
 
 function tokensFor(plan: Plan): Address[] {
@@ -100,8 +115,12 @@ function marketsFor(plan: Plan): Market[] {
   return plan.markets ?? [plan.market];
 }
 
-/** Position + health reads for every market, two calls each, then the Aave account if used. */
+/** Position + health reads for every market, two calls each, then the Aave v3 / v4 accounts if used. */
 function stateCalls(plan: Plan): RawCall[] {
+  const v4 = (functionName: "getUserSuppliedAssets" | "getUserTotalDebt", r: AaveV4Reserve): RawCall => ({
+    to: AAVE_V4.spoke,
+    data: encodeFunctionData({ abi: aaveV4SpokeAbi, functionName, args: [r.reserveId, plan.owner] }),
+  });
   return [
     ...marketsFor(plan).flatMap((m) => [
       { to: MORPHO, data: encodeFunctionData({ abi: morphoAbi, functionName: "position", args: [m.id, plan.owner] }) },
@@ -109,6 +128,12 @@ function stateCalls(plan: Plan): RawCall[] {
     ]),
     ...(plan.aave
       ? [{ to: AAVE_POOL, data: encodeFunctionData({ abi: aavePoolAbi, functionName: "getUserAccountData", args: [plan.owner] }) }]
+      : []),
+    ...(plan.aaveV4
+      ? [
+          { to: AAVE_V4.spoke, data: encodeFunctionData({ abi: aaveV4SpokeAbi, functionName: "getUserAccountData", args: [plan.owner] }) },
+          ...plan.aaveV4.flatMap((r) => [v4("getUserSuppliedAssets", r), v4("getUserTotalDebt", r)]),
+        ]
       : []),
   ];
 }
@@ -124,15 +149,27 @@ function decodeState(plan: Plan, results: Hex[]) {
     return { market, collateral, borrowShares, health };
   });
   const primary = positions.find((p) => p.market.id === plan.market.id) ?? positions[0];
+  let next = 2 * positions.length;
   const aave = plan.aave
-    ? decodeFunctionResult({ abi: aavePoolAbi, functionName: "getUserAccountData", data: results[2 * positions.length] })
+    ? decodeFunctionResult({ abi: aavePoolAbi, functionName: "getUserAccountData", data: results[next++] })
     : undefined;
+  let aaveV4After: { health: bigint; reserves: { reserve: AaveV4Reserve; supplied: bigint; debt: bigint }[] } | undefined;
+  if (plan.aaveV4) {
+    const account = decodeFunctionResult({ abi: aaveV4SpokeAbi, functionName: "getUserAccountData", data: results[next++] });
+    const reserves = plan.aaveV4.map((reserve) => ({
+      reserve,
+      supplied: decodeFunctionResult({ abi: aaveV4SpokeAbi, functionName: "getUserSuppliedAssets", data: results[next++] }),
+      debt: decodeFunctionResult({ abi: aaveV4SpokeAbi, functionName: "getUserTotalDebt", data: results[next++] }),
+    }));
+    aaveV4After = { health: account[2], reserves }; // UserAccountData.healthFactor
+  }
   return {
     positions,
     borrowSharesAfter: primary?.borrowShares,
     collateralAfter: primary?.collateral,
     healthAfter: primary?.health,
     aaveHealthAfter: aave?.[5],
+    aaveV4After,
   };
 }
 

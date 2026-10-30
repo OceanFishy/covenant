@@ -5,6 +5,7 @@ import {CovenantCore} from "../CovenantCore.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IMorpho} from "../interfaces/IMorpho.sol";
 import {IAavePool} from "../interfaces/IAave.sol";
+import {IAaveV4Giver, IAaveV4Spoke, IAaveV4Taker} from "../interfaces/IAaveV4.sol";
 import {IPYieldToken, IStandardizedYield} from "../interfaces/IPendle.sol";
 
 /// @notice Ethereum mainnet addresses and the Executor allowlist built from them.
@@ -28,6 +29,17 @@ library MainnetConfig {
     address internal constant A_USDT = 0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a; // aEthUSDT
     address internal constant VDEBT_USDC = 0x72E95b8931767C79bA4EeE721354d6E99a61D004; // variableDebtEthUSDC
     address internal constant VDEBT_USDT = 0x6df1C1E379bC5a00a7b4C6e67A203333772f45A8; // variableDebtEthUSDT
+
+    // Aave v4 (Main Spoke on the Core Hub). A Spoke lets only the user, or a governance-activated
+    // position manager the user approved, act on a position. Under EIP-7702 your account is the
+    // caller, so plans call the Spoke directly. A deployed Executor goes through Aave's own
+    // managers instead: the Giver (supply / repay for anyone, pulls from the caller) and the Taker
+    // (withdraw / borrow up to allowances you grant the Executor per reserve).
+    address internal constant AAVE_V4_MAIN_SPOKE = 0x94e7A5dCbE816e498b89aB752661904E2F56c485;
+    address internal constant AAVE_V4_GIVER = 0x17A54b8d6D9C68e7fa1C7112AC998EA1BA51d11e;
+    address internal constant AAVE_V4_TAKER = 0x6c044c0D3801499bCAbfAd458B70880bc518e9F7;
+    uint256 internal constant AAVE_V4_USDC_RESERVE = 7; // Main Spoke reserve ids
+    uint256 internal constant AAVE_V4_USDT_RESERVE = 8;
 
     // DEX aggregators: USDC <-> USDT (USDT-debt loops) and reUSD <-> USDC (reUSD loops; Re's own
     // mint/redeem is KYC-gated). Only USDC, USDT and reUSD may be approved to them, never Pendle
@@ -62,7 +74,7 @@ library MainnetConfig {
         uint256 RECIPIENT = 1 << 255;
         address[10] memory tokens = [USDC, USDT, USD3, REUSD, PT_USD3, YT_USD3, SY_USD3, PT_REUSD, YT_REUSD, SY_REUSD];
 
-        r = new CovenantCore.RuleInit[](6 + tokens.length * 3 + 4 * 2 + 3 + 2 + 4 + 2 * 2);
+        r = new CovenantCore.RuleInit[](6 + tokens.length * 3 + 4 * 2 + 3 + 2 + 4 + 2 * 2 + 4 + 4);
         uint256 n;
 
         // Morpho Blue. MarketParams is 5 static words (0..4), so arguments start at word 5.
@@ -122,16 +134,36 @@ library MainnetConfig {
             r[n++] = _r(aTokens[i], IERC20.transferFrom.selector, ALLOWED | w(0) | w(1));
         }
 
+        // Aave v4 position managers: f(spoke, reserveId, amount, onBehalfOf). The Spoke must be
+        // one Aave registered with the manager; onBehalfOf is pinned to the owner/Executor. Taker
+        // allowances (approveWithdraw / approveBorrow) and Spoke position-manager approvals have no
+        // rule: only the owner grants them, from their wallet.
+        r[n++] = _r(AAVE_V4_GIVER, IAaveV4Giver.supplyOnBehalfOf.selector, ALLOWED | w(3));
+        r[n++] = _r(AAVE_V4_GIVER, IAaveV4Giver.repayOnBehalfOf.selector, ALLOWED | w(3));
+        r[n++] = _r(AAVE_V4_TAKER, IAaveV4Taker.withdrawOnBehalfOf.selector, ALLOWED | w(3));
+        r[n++] = _r(AAVE_V4_TAKER, IAaveV4Taker.borrowOnBehalfOf.selector, ALLOWED | w(3));
+        // Aave v4 Spoke, called directly under EIP-7702: f(reserveId, amount, onBehalfOf), with
+        // onBehalfOf pinned. Withdrawn / borrowed funds go to the caller. setUserPositionManager
+        // and setUsingAsCollateral have no rule.
+        r[n++] = _r(AAVE_V4_MAIN_SPOKE, IAaveV4Spoke.supply.selector, ALLOWED | w(2));
+        r[n++] = _r(AAVE_V4_MAIN_SPOKE, IAaveV4Spoke.withdraw.selector, ALLOWED | w(2));
+        r[n++] = _r(AAVE_V4_MAIN_SPOKE, IAaveV4Spoke.borrow.selector, ALLOWED | w(2));
+        r[n++] = _r(AAVE_V4_MAIN_SPOKE, IAaveV4Spoke.repay.selector, ALLOWED | w(2));
+
         assert(n == r.length);
     }
 
     function recipients() internal pure returns (CovenantCore.RecipientInit[] memory r) {
-        r = new CovenantCore.RecipientInit[](22);
+        r = new CovenantCore.RecipientInit[](26);
         uint256 n;
         r[n++] = CovenantCore.RecipientInit(USDC, MORPHO); // repay / flash repayment
         r[n++] = CovenantCore.RecipientInit(USDT, MORPHO); // repay / flash repayment (USDT market)
         r[n++] = CovenantCore.RecipientInit(USDC, AAVE_POOL); // Aave supply / repay
         r[n++] = CovenantCore.RecipientInit(USDT, AAVE_POOL); // Aave supply / repay
+        r[n++] = CovenantCore.RecipientInit(USDC, AAVE_V4_GIVER); // Aave v4 supply / repay (Executor)
+        r[n++] = CovenantCore.RecipientInit(USDT, AAVE_V4_GIVER); // Aave v4 supply / repay (Executor)
+        r[n++] = CovenantCore.RecipientInit(USDC, AAVE_V4_MAIN_SPOKE); // Aave v4 supply / repay (7702)
+        r[n++] = CovenantCore.RecipientInit(USDT, AAVE_V4_MAIN_SPOKE); // Aave v4 supply / repay (7702)
         r[n++] = CovenantCore.RecipientInit(USDC, ZEROX_ALLOWANCE_HOLDER); // USDC -> USDT
         r[n++] = CovenantCore.RecipientInit(USDT, ZEROX_ALLOWANCE_HOLDER); // USDT -> USDC
         r[n++] = CovenantCore.RecipientInit(USDC, KYBER_ROUTER);

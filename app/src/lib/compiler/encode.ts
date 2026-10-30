@@ -85,6 +85,16 @@ export function minHeldCall(x: Runner, token: Address, min: bigint): Call {
     : call(x.executor, encodeFunctionData({ abi: executorAbi, functionName: "assertMinBalance", args: [token, x.executor, min] }));
 }
 
+/** The owner's live Aave v4 debt (drawn + premium) on `spoke`'s reserve, scaled by `bps`. */
+export function aaveV4DebtPatch(offset: number, spoke: Address, reserveId: bigint, user: Address, bps = FULL): Patch {
+  return {
+    offset,
+    source: Source.AAVE_V4_DEBT,
+    args: encodeAbiParameters([{ type: "address" }, { type: "uint256" }, { type: "address" }], [spoke, reserveId, user]),
+    bps,
+  };
+}
+
 /** `data` for Morpho.flashLoan: abi.encode(token, Call[]) consumed by onMorphoFlashLoan. */
 export function encodeFlashData(token: Address, inner: Call[]): Hex {
   return encodeAbiParameters([{ type: "address" }, callsType], [token, inner]);

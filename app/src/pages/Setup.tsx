@@ -4,7 +4,7 @@ import { AddressLink, Card, Notice, SentLine, useSendTx } from "../components/co
 import { usePoll } from "../hooks";
 import { DELEGATE } from "../lib/abis";
 import { DEV_FORK, publicClient } from "../lib/chain";
-import { aaveSetupSteps, deployData, deployDelegateTx, initializeTx, setupSteps, type SetupStep } from "../lib/executor";
+import { aaveSetupSteps, aaveV4SetupSteps, deployData, deployDelegateTx, initializeTx, setupSteps, type SetupStep } from "../lib/executor";
 import { PROTECTED_RPCS } from "../lib/mev";
 import { useApp } from "../state";
 
@@ -29,9 +29,21 @@ export function SetupPage() {
             intro="Only for the Aave Borrow and Withdraw blocks; supplying and repaying need nothing. Revocable at any time (Access)."
             steps={aaveSetupSteps(app.executor)}
           />
+          <PermissionSteps
+            title="5. Aave v4 (optional)"
+            intro="Only for the Aave v4 blocks. Aave v4 lets only you or a position manager Aave governance activated act on your position, so the Executor goes through Aave's Giver (supply / repay) and Taker (withdraw / borrow, within the allowances you grant here). Revocable at any time (Access)."
+            steps={aaveV4SetupSteps(app.conn!.account, app.executor)}
+          />
         </>
       )}
       {app.conn && <DelegationStep />}
+      {app.conn && self && app.executor && app.executorCheck?.ok && (
+        <PermissionSteps
+          title="3. Aave v4 (optional)"
+          intro="Your account calls the Aave v4 Spoke itself, so no position managers or allowances are needed. Only a supply you want to borrow against must be enabled as collateral, once, from your wallet."
+          steps={aaveV4SetupSteps(app.conn.account, app.executor)}
+        />
+      )}
     </>
   );
 }

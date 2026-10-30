@@ -2,9 +2,10 @@ import type { Address } from "viem";
 import { PULL_TOKENS, SWAP_TOKENS } from "../../lib/builder/catalog";
 import { marketByKey, seriesByKey } from "../../lib/builder/compile";
 import type { Amount, Block } from "../../lib/builder/types";
-import { AAVE_RESERVES, MARKETS, SERIES, TOKENS, label } from "../../lib/registry";
+import { AAVE_RESERVES, AAVE_V4_RESERVES, MARKETS, SERIES, TOKENS, label } from "../../lib/registry";
 
 const AAVE_ASSETS: Address[] = AAVE_RESERVES.map((r) => r.asset);
+const AAVE_V4_ASSETS: Address[] = AAVE_V4_RESERVES.map((r) => r.asset);
 
 type Props<B extends Block> = { block: B; onChange: (b: Block) => void };
 
@@ -48,7 +49,8 @@ const KIND_LABEL: Record<Amount["kind"], string> = {
   debt: "Whole debt",
   collateral: "All collateral",
   allShares: "All debt (by shares)",
-  aaveDebt: "Whole Aave debt",
+  aaveDebt: "Whole Aave v3 debt",
+  aaveV4Debt: "Whole Aave v4 debt",
   allDebt: "All debt (exact)",
   supplied: "All supplied",
 };
@@ -66,7 +68,7 @@ function AmountEditor<A extends Amount>({
   kinds: Amount["kind"][];
   unit: string;
   market?: string;
-  /** Default asset for a new "Whole Aave debt" amount. */
+  /** Default asset for a new "Whole Aave v3/v4 debt" amount. */
   aaveAsset?: Address;
   onChange: (a: A) => void;
 }) {
@@ -77,6 +79,8 @@ function AmountEditor<A extends Amount>({
       case "debt":
         return { kind, market: market ?? MARKETS[0].key, bps: 10_001 };
       case "aaveDebt":
+        return { kind, asset: aaveAsset ?? TOKENS.USDC.address, bps: 10_000 };
+      case "aaveV4Debt":
         return { kind, asset: aaveAsset ?? TOKENS.USDC.address, bps: 10_000 };
       default:
         return { kind } as Amount;
@@ -99,13 +103,18 @@ function AmountEditor<A extends Amount>({
           <span className="muted small">{unit}</span>
         </>
       )}
-      {(value.kind === "debt" || value.kind === "aaveDebt") && (
+      {(value.kind === "debt" || value.kind === "aaveDebt" || value.kind === "aaveV4Debt") && (
         <>
           <span className="muted small">of</span>
           {value.kind === "debt" ? (
             <MarketSelect value={value.market} onChange={(m) => onChange({ ...value, market: m })} />
           ) : (
-            <TokenSelect value={value.asset} options={AAVE_ASSETS} onChange={(asset) => onChange({ ...value, asset })} aria="Aave debt token" />
+            <TokenSelect
+              value={value.asset}
+              options={value.kind === "aaveDebt" ? AAVE_ASSETS : AAVE_V4_ASSETS}
+              onChange={(asset) => onChange({ ...value, asset })}
+              aria={value.kind === "aaveDebt" ? "Aave debt token" : "Aave v4 debt token"}
+            />
           )}
           <span className="muted small">+</span>
           <input
@@ -140,7 +149,13 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
       return (
         <span className="row tight">
           <TokenSelect value={b.token} options={[TOKENS.USDC.address, TOKENS.USDT.address]} onChange={(token) => set({ token })} aria="loan token" />
-          <AmountEditor value={b.amount} kinds={["debt", "aaveDebt", "fixed"]} unit={label(b.token)} aaveAsset={b.token} onChange={(amount) => set({ amount })} />
+          <AmountEditor
+            value={b.amount}
+            kinds={["debt", "aaveDebt", "aaveV4Debt", "fixed"]}
+            unit={label(b.token)}
+            aaveAsset={b.token}
+            onChange={(amount) => set({ amount })}
+          />
         </span>
       );
     case "repay":
@@ -218,7 +233,7 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
           </select>
           <AmountEditor
             value={b.amount}
-            kinds={b.mode === "minOut" ? ["fixed", "debt", "aaveDebt"] : ["fixed"]}
+            kinds={b.mode === "minOut" ? ["fixed", "debt", "aaveDebt", "aaveV4Debt"] : ["fixed"]}
             unit={label(b.mode === "exactIn" ? b.sell : b.buy)}
             aaveAsset={b.buy}
             onChange={(amount) => set({ amount })}
@@ -262,7 +277,33 @@ export function BlockEditor({ block: b, onChange }: Props<Block>) {
     case "guardAaveHealth":
       return (
         <span className="row tight">
-          <span className="muted small">Aave health factor ≥</span>
+          <span className="muted small">Aave v3 health factor ≥</span>
+          <input className="num short" inputMode="decimal" value={b.min} onChange={(e) => set({ min: e.target.value })} aria-label="minimum health factor" />
+        </span>
+      );
+    case "aaveV4Supply":
+    case "aaveV4Withdraw":
+    case "aaveV4Borrow":
+    case "aaveV4Repay": {
+      const kinds: Record<typeof b.type, Amount["kind"][]> = {
+        aaveV4Supply: ["balance", "fixed"],
+        aaveV4Withdraw: ["supplied", "fixed"],
+        aaveV4Borrow: ["fixed"],
+        aaveV4Repay: ["allDebt", "balance", "fixed"],
+      };
+      return (
+        <span className="row tight">
+          <TokenSelect value={b.asset} options={AAVE_V4_ASSETS} onChange={(asset) => set({ asset })} aria="Aave v4 asset" />
+          <AmountEditor<Amount> value={b.amount} kinds={kinds[b.type]} unit={label(b.asset)} onChange={(amount) => set({ amount } as Partial<Block>)} />
+        </span>
+      );
+    }
+    case "guardAaveV4NoDebt":
+      return <TokenSelect value={b.asset} options={AAVE_V4_ASSETS} onChange={(asset) => set({ asset })} aria="Aave v4 asset" />;
+    case "guardAaveV4Health":
+      return (
+        <span className="row tight">
+          <span className="muted small">Aave v4 health factor ≥</span>
           <input className="num short" inputMode="decimal" value={b.min} onChange={(e) => set({ min: e.target.value })} aria-label="minimum health factor" />
         </span>
       );

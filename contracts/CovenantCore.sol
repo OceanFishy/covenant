@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {IERC20} from "./interfaces/IERC20.sol";
 import {IMorpho, IOracle, MarketParams, Market, Position} from "./interfaces/IMorpho.sol";
 import {IAavePool} from "./interfaces/IAave.sol";
+import {IAaveV4Spoke} from "./interfaces/IAaveV4.sol";
 
 /// @title CovenantCore
 /// @notice The execution engine shared by the deployed Executor ({CovenantExecutor}) and the
@@ -24,7 +25,8 @@ abstract contract CovenantCore {
         MORPHO_COLLATERAL, // args: (bytes32 id, address user)
         MORPHO_BORROW_SHARES, // args: (bytes32 id, address user)
         MORPHO_DEBT_ASSETS, // args: (bytes32 id, address user), rounded up; accrue interest first
-        OWNED // args: (address token): what the plan itself holds of `token` (see {_owned})
+        OWNED, // args: (address token): what the plan itself holds of `token` (see {_owned})
+        AAVE_V4_DEBT // args: (address spoke, uint256 reserveId, address user): drawn + premium debt
     }
 
     struct Patch {
@@ -90,6 +92,8 @@ abstract contract CovenantCore {
     error DebtRemaining(bytes32 id, uint256 borrowShares);
     error HealthTooLow(bytes32 id, uint256 health, uint256 min);
     error AaveHealthTooLow(address user, uint256 health, uint256 min);
+    error AaveV4HealthTooLow(address spoke, address user, uint256 health, uint256 min);
+    error AaveV4DebtRemaining(address spoke, uint256 reserveId, uint256 debt);
 
     constructor(IMorpho morpho_, IAavePool aavePool_) {
         morpho = morpho_;
@@ -161,6 +165,10 @@ abstract contract CovenantCore {
             return IERC20(token).balanceOf(account);
         }
         if (source == Source.OWNED) return _owned(abi.decode(args, (address)));
+        if (source == Source.AAVE_V4_DEBT) {
+            (address spoke, uint256 reserveId, address debtor) = abi.decode(args, (address, uint256, address));
+            return IAaveV4Spoke(spoke).getUserTotalDebt(reserveId, debtor);
+        }
         (bytes32 id, address user) = abi.decode(args, (bytes32, address));
         Position memory pos = morpho.position(id, user);
         if (source == Source.MORPHO_COLLATERAL) return pos.collateral;
@@ -241,6 +249,18 @@ abstract contract CovenantCore {
         if (h < minHealth) revert AaveHealthTooLow(user, h, minHealth);
     }
 
+    /// @param minHealth Minimum Aave v4 health factor on `spoke` in WAD (1e18 = liquidation
+    /// threshold). A user with no debt there has type(uint256).max.
+    function assertMinAaveV4Health(address spoke, address user, uint256 minHealth) external view {
+        uint256 h = IAaveV4Spoke(spoke).getUserAccountData(user).healthFactor;
+        if (h < minHealth) revert AaveV4HealthTooLow(spoke, user, h, minHealth);
+    }
+
+    function assertNoAaveV4Debt(address spoke, uint256 reserveId, address user) external view {
+        uint256 debt = IAaveV4Spoke(spoke).getUserTotalDebt(reserveId, user);
+        if (debt != 0) revert AaveV4DebtRemaining(spoke, reserveId, debt);
+    }
+
     /// @notice Health factor in WAD, using the market's last-accrued totals.
     /// Returns type(uint256).max when there is no debt.
     function healthFactor(bytes32 id, address user) public view returns (uint256) {
@@ -277,6 +297,8 @@ abstract contract CovenantCore {
         _setRule(address(this), CovenantCore.assertNoDebt.selector, ALLOWED);
         _setRule(address(this), CovenantCore.assertMinHealth.selector, ALLOWED);
         _setRule(address(this), CovenantCore.assertMinAaveHealth.selector, ALLOWED);
+        _setRule(address(this), CovenantCore.assertMinAaveV4Health.selector, ALLOWED);
+        _setRule(address(this), CovenantCore.assertNoAaveV4Debt.selector, ALLOWED);
     }
 
     function _setRules(RuleInit[] memory rules_, RecipientInit[] memory recipients_) internal {

@@ -1,6 +1,6 @@
 import { encodeFunctionData, getAddress, maxUint256, parseUnits, type Address, type PublicClient } from "viem";
-import { aavePoolAbi, erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../abis";
-import { arg, balancePatch, call, encodeExecute, encodeFlashData, hashCalls, heldPatch, is7702, minHeldCall, morphoPatch, pullCall } from "../compiler/encode";
+import { aavePoolAbi, aaveV4GiverAbi, aaveV4SpokeAbi, aaveV4TakerAbi, erc20Abi, executorAbi, morphoAbi, syAbi, ytAbi } from "../abis";
+import { aaveV4DebtPatch, arg, balancePatch, call, encodeExecute, encodeFlashData, hashCalls, heldPatch, is7702, minHeldCall, morphoPatch, pullCall } from "../compiler/encode";
 import { fmt } from "../compiler/plans";
 import { Source, type Call, type Patch, type Plan, type Step, type Swap } from "../compiler/types";
 import { expectedDebt } from "../positions";
@@ -8,6 +8,8 @@ import { quoteExactIn, quoteForMinOut, type QuoteConfig } from "../quotes";
 import {
   AAVE_POOL,
   AAVE_RESERVES,
+  AAVE_V4,
+  AAVE_V4_RESERVES,
   MARKETS,
   MORPHO,
   SERIES,
@@ -15,13 +17,15 @@ import {
   TRACKED_TOKENS,
   label,
   reserveOf,
+  reserveV4Of,
   tokenInfo,
   type AaveReserve,
+  type AaveV4Reserve,
   type Market,
   type PendleSeries,
 } from "../registry";
 import { SWAP_TOKENS } from "./catalog";
-import type { AaveDebt, Amount, Block, Debt, Fixed, Issue } from "./types";
+import type { AaveDebt, AaveV4Debt, Amount, Block, Debt, Fixed, Issue } from "./types";
 
 /** Aave v3 variable rate (stable rate is gone from v3). */
 const VARIABLE = 2n;
@@ -82,7 +86,10 @@ export function validate(blocks: Block[]): Issue[] {
     }
   };
   const checkReserve = (b: Block, asset: Address) => {
-    if (!AAVE_RESERVES.some((r) => eq(r.asset, asset))) err(b, "only USDC and USDT are supported on Aave");
+    if (!AAVE_RESERVES.some((r) => eq(r.asset, asset))) err(b, "only USDC and USDT are supported on Aave v3");
+  };
+  const checkReserveV4 = (b: Block, asset: Address) => {
+    if (!AAVE_V4_RESERVES.some((r) => eq(r.asset, asset))) err(b, "only USDC and USDT are supported on Aave v4");
   };
 
   const ytIn = new Set<string>(); // series whose YT reaches the executor before redeemPY
@@ -94,6 +101,7 @@ export function validate(blocks: Block[]): Issue[] {
           if (!b.children.length) err(b, "drop the blocks that use the loan inside the flash loan");
           if (b.amount.kind === "fixed") checkFixed(b, b.amount, b.token);
           if (b.amount.kind === "aaveDebt") checkReserve(b, b.amount.asset);
+          if (b.amount.kind === "aaveV4Debt") checkReserveV4(b, b.amount.asset);
           visit(b.children, true);
           break;
         case "pull":
@@ -134,6 +142,7 @@ export function validate(blocks: Block[]): Issue[] {
           if (eq(b.sell, b.buy)) err(b, "sell and buy tokens are the same");
           if (b.amount.kind === "fixed") checkFixed(b, b.amount, b.mode === "exactIn" ? b.sell : b.buy);
           if (b.amount.kind === "aaveDebt") checkReserve(b, b.amount.asset);
+          if (b.amount.kind === "aaveV4Debt") checkReserveV4(b, b.amount.asset);
           break;
         case "guardMinBalance":
           checkFixed(b, b.min, b.token, false);
@@ -155,7 +164,21 @@ export function validate(blocks: Block[]): Issue[] {
           checkReserve(b, b.asset);
           break;
         case "guardAaveHealth":
+        case "guardAaveV4Health":
           if (!(Number(b.min) > 0)) err(b, "enter a health factor like 1.05");
+          break;
+        case "aaveV4Supply":
+        case "aaveV4Withdraw":
+        case "aaveV4Repay":
+          checkReserveV4(b, b.asset);
+          if (b.amount.kind === "fixed") checkFixed(b, b.amount, b.asset);
+          break;
+        case "aaveV4Borrow":
+          checkReserveV4(b, b.asset);
+          checkFixed(b, b.amount, b.asset);
+          break;
+        case "guardAaveV4NoDebt":
+          checkReserveV4(b, b.asset);
           break;
         default:
           break;
@@ -209,7 +232,9 @@ function amountText(a: Amount, token: Address): string {
     case "allShares":
       return "all debt (by shares, no dust)";
     case "aaveDebt":
-      return `the whole Aave ${label(a.asset)} debt${a.bps !== 10_000 ? ` + ${((a.bps - 10_000) / 100).toFixed(2)}%` : ""}`;
+      return `the whole Aave v3 ${label(a.asset)} debt${a.bps !== 10_000 ? ` + ${((a.bps - 10_000) / 100).toFixed(2)}%` : ""}`;
+    case "aaveV4Debt":
+      return `the whole Aave v4 ${label(a.asset)} debt${a.bps !== 10_000 ? ` + ${((a.bps - 10_000) / 100).toFixed(2)}%` : ""}`;
     case "allDebt":
       return `all Aave ${label(token)} debt (exact, read at execution)`;
     case "supplied":
@@ -217,10 +242,15 @@ function amountText(a: Amount, token: Address): string {
   }
 }
 
-/** Live amount for a Debt / AaveDebt (+bps), to size an aggregator quote. */
-async function debtNow(x: CompileContext, d: Debt | AaveDebt): Promise<bigint> {
+/** Live amount for a Debt / AaveDebt / AaveV4Debt (+bps), to size an aggregator quote. */
+async function debtNow(x: CompileContext, d: Debt | AaveDebt | AaveV4Debt): Promise<bigint> {
   if (d.kind === "aaveDebt") {
     const debt = await x.client.readContract({ address: reserveOf(d.asset).debtToken.address, abi: erc20Abi, functionName: "balanceOf", args: [x.owner] });
+    return (debt * BigInt(d.bps)) / 10_000n;
+  }
+  if (d.kind === "aaveV4Debt") {
+    const r = reserveV4Of(d.asset);
+    const debt = await x.client.readContract({ address: AAVE_V4.spoke, abi: aaveV4SpokeAbi, functionName: "getUserTotalDebt", args: [r.reserveId, x.owner] });
     return (debt * BigInt(d.bps)) / 10_000n;
   }
   const m = marketByKey(d.market);
@@ -236,6 +266,7 @@ async function compileBlock(
   swaps: Record<string, Swap>,
   used: Set<string>,
   aave: Set<AaveReserve>,
+  aaveV4: Set<AaveV4Reserve>,
 ) {
   const me = x.executor;
   switch (b.type) {
@@ -252,7 +283,7 @@ async function compileBlock(
     }
     case "flashLoan": {
       const inner = new Out(1);
-      for (const c of b.children) await compileBlock(c, x, inner, swaps, used, aave);
+      for (const c of b.children) await compileBlock(c, x, inner, swaps, used, aave, aaveV4);
       inner.steps.push({ text: "Morpho takes the flash loan back", depth: 1 });
       const data = (assets: bigint) =>
         encodeFunctionData({ abi: morphoAbi, functionName: "flashLoan", args: [b.token, assets, encodeFlashData(b.token, inner.calls)] });
@@ -268,6 +299,13 @@ async function compileBlock(
         aave.add(r);
         out.add(
           call(MORPHO, data(0n), balancePatch(arg(1), r.debtToken.address, x.owner, b.amount.bps)),
+          `Flash-borrow ${amountText(b.amount, b.token)} in ${label(b.token)} from Morpho (fee-free)`,
+        );
+      } else if (b.amount.kind === "aaveV4Debt") {
+        const r = reserveV4Of(b.amount.asset);
+        aaveV4.add(r);
+        out.add(
+          call(MORPHO, data(0n), aaveV4DebtPatch(arg(1), AAVE_V4.spoke, r.reserveId, x.owner, b.amount.bps)),
           `Flash-borrow ${amountText(b.amount, b.token)} in ${label(b.token)} from Morpho (fee-free)`,
         );
       } else {
@@ -424,12 +462,12 @@ async function compileBlock(
       const t = r.asset;
       const data = (v: bigint) => encodeFunctionData({ abi: aavePoolAbi, functionName: "supply", args: [t, v, x.owner, 0] });
       if (b.amount.kind === "balance") {
-        out.add(approve(t, AAVE_POOL, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Aave`);
-        out.add(call(AAVE_POOL, data(0n), heldPatch(x, arg(1), t)), `Supply all ${label(t)} to Aave for you`);
+        out.add(approve(t, AAVE_POOL, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Aave v3`);
+        out.add(call(AAVE_POOL, data(0n), heldPatch(x, arg(1), t)), `Supply all ${label(t)} to Aave v3 for you`);
       } else {
         const v = toUnits(b.amount, t);
-        out.add(approve(t, AAVE_POOL, v), `Approve ${fmt(v, t)} to Aave`);
-        out.add(call(AAVE_POOL, data(v)), `Supply ${fmt(v, t)} to Aave for you`);
+        out.add(approve(t, AAVE_POOL, v), `Approve ${fmt(v, t)} to Aave v3`);
+        out.add(call(AAVE_POOL, data(v)), `Supply ${fmt(v, t)} to Aave v3 for you`);
       }
       return;
     }
@@ -451,7 +489,7 @@ async function compileBlock(
       }
       out.add(
         call(AAVE_POOL, encodeFunctionData({ abi: aavePoolAbi, functionName: "withdraw", args: [r.asset, amount, me] })),
-        `Withdraw ${amount === maxUint256 ? "it" : fmt(amount, r.asset)} from Aave as ${label(r.asset)}`,
+        `Withdraw ${amount === maxUint256 ? "it" : fmt(amount, r.asset)} from Aave v3 as ${label(r.asset)}`,
       );
       return;
     }
@@ -461,7 +499,7 @@ async function compileBlock(
       const v = toUnits(b.amount, r.asset);
       out.add(
         call(AAVE_POOL, encodeFunctionData({ abi: aavePoolAbi, functionName: "borrow", args: [r.asset, v, VARIABLE, 0, x.owner] })),
-        `Borrow ${fmt(v, r.asset)} on Aave for you (variable rate)`,
+        `Borrow ${fmt(v, r.asset)} on Aave v3 for you (variable rate)`,
       );
       return;
     }
@@ -472,16 +510,16 @@ async function compileBlock(
       const data = (v: bigint) => encodeFunctionData({ abi: aavePoolAbi, functionName: "repay", args: [t, v, VARIABLE, x.owner] });
       if (b.amount.kind === "fixed") {
         const v = toUnits(b.amount, t);
-        out.add(approve(t, AAVE_POOL, v), `Approve ${fmt(v, t)} to Aave`);
-        out.add(call(AAVE_POOL, data(v)), `Repay ${fmt(v, t)} of your Aave debt`);
+        out.add(approve(t, AAVE_POOL, v), `Approve ${fmt(v, t)} to Aave v3`);
+        out.add(call(AAVE_POOL, data(v)), `Repay ${fmt(v, t)} of your Aave v3 debt`);
         return;
       }
-      out.add(approve(t, AAVE_POOL, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Aave for the repayment`);
+      out.add(approve(t, AAVE_POOL, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to Aave v3 for the repayment`);
       if (b.amount.kind === "allDebt") {
         // Aave rejects type(uint256).max on behalf of someone else: repay all = the live debt token balance.
-        out.add(call(AAVE_POOL, data(0n), balancePatch(arg(1), r.debtToken.address, x.owner)), `Repay ${amountText(b.amount, t)}`);
+        out.add(call(AAVE_POOL, data(0n), balancePatch(arg(1), r.debtToken.address, x.owner)), `Repay all your Aave v3 ${label(t)} debt (exact, read at execution)`);
       } else {
-        out.add(call(AAVE_POOL, data(0n), heldPatch(x, arg(1), t)), `Repay up to all ${label(t)} of your Aave debt`);
+        out.add(call(AAVE_POOL, data(0n), heldPatch(x, arg(1), t)), `Repay up to all ${label(t)} of your Aave v3 debt`);
       }
       return;
     }
@@ -490,18 +528,116 @@ async function compileBlock(
       aave.add(r);
       out.add(
         call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertMaxBalance", args: [r.debtToken.address, x.owner, 0n] })),
-        `Check: no ${label(r.asset)} debt left on Aave`,
+        `Check: no ${label(r.asset)} debt left on Aave v3`,
       );
       return;
     }
     case "guardAaveHealth": {
       out.add(
         call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertMinAaveHealth", args: [x.owner, healthWad(b.min)] })),
-        `Check: Aave health factor ≥ ${b.min}`,
+        `Check: Aave v3 health factor ≥ ${b.min}`,
+      );
+      return;
+    }
+    case "aaveV4Supply": {
+      const r = reserveV4Of(b.asset);
+      aaveV4.add(r);
+      const t = r.asset;
+      const { target, data, amountAt } = v4Call(x, "supply", r);
+      if (b.amount.kind === "balance") {
+        out.add(approve(t, target, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to the ${label(target)}`);
+        out.add(call(target, data(0n), heldPatch(x, amountAt, t)), `Supply all ${label(t)} to Aave v4 for you`);
+      } else {
+        const v = toUnits(b.amount, t);
+        out.add(approve(t, target, v), `Approve ${fmt(v, t)} to the ${label(target)}`);
+        out.add(call(target, data(v)), `Supply ${fmt(v, t)} to Aave v4 for you`);
+      }
+      return;
+    }
+    case "aaveV4Withdraw": {
+      const r = reserveV4Of(b.asset);
+      aaveV4.add(r);
+      // An amount above the supply withdraws all of it (the Spoke caps it).
+      const v = b.amount.kind === "supplied" ? maxUint256 : toUnits(b.amount, r.asset);
+      const { target, data } = v4Call(x, "withdraw", r);
+      const into = is7702(x) ? "your wallet" : "the Executor";
+      out.add(
+        call(target, data(v)),
+        b.amount.kind === "supplied" ? `Withdraw all your ${label(r.asset)} from Aave v4 into ${into}` : `Withdraw ${fmt(v, r.asset)} from Aave v4 into ${into}`,
+      );
+      return;
+    }
+    case "aaveV4Borrow": {
+      const r = reserveV4Of(b.asset);
+      aaveV4.add(r);
+      const v = toUnits(b.amount, r.asset);
+      out.add(call(v4Call(x, "borrow", r).target, v4Call(x, "borrow", r).data(v)), `Borrow ${fmt(v, r.asset)} on Aave v4 for you`);
+      return;
+    }
+    case "aaveV4Repay": {
+      const r = reserveV4Of(b.asset);
+      aaveV4.add(r);
+      const t = r.asset;
+      const { target, data, amountAt } = v4Call(x, "repay", r);
+      if (b.amount.kind === "fixed") {
+        const v = toUnits(b.amount, t);
+        out.add(approve(t, target, v), `Approve ${fmt(v, t)} to the ${label(target)}`);
+        out.add(call(target, data(v)), `Repay ${fmt(v, t)} of your Aave v4 debt`);
+        return;
+      }
+      out.add(approve(t, target, 0n, heldPatch(x, arg(1), t)), `Approve all ${label(t)} to the ${label(target)} for the repayment`);
+      if (b.amount.kind === "allDebt") {
+        // Exactly the live debt, read at execution (the Giver also rejects type(uint256).max).
+        out.add(call(target, data(0n), aaveV4DebtPatch(amountAt, AAVE_V4.spoke, r.reserveId, x.owner)), `Repay all your Aave v4 ${label(t)} debt (exact, read at execution)`);
+      } else {
+        // Capped at the debt; the rest stays with the plan.
+        out.add(call(target, data(0n), heldPatch(x, amountAt, t)), `Repay up to all ${label(t)} of your Aave v4 debt`);
+      }
+      return;
+    }
+    case "guardAaveV4NoDebt": {
+      const r = reserveV4Of(b.asset);
+      aaveV4.add(r);
+      out.add(
+        call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertNoAaveV4Debt", args: [AAVE_V4.spoke, r.reserveId, x.owner] })),
+        `Check: no ${label(r.asset)} debt left on Aave v4`,
+      );
+      return;
+    }
+    case "guardAaveV4Health": {
+      out.add(
+        call(me, encodeFunctionData({ abi: executorAbi, functionName: "assertMinAaveV4Health", args: [AAVE_V4.spoke, x.owner, healthWad(b.min)] })),
+        `Check: Aave v4 health factor ≥ ${b.min}`,
       );
       return;
     }
   }
+}
+
+/**
+ * An Aave v4 action on the owner's Main Spoke position. Under EIP-7702 your account is the caller,
+ * so it is the Spoke's own f(reserveId, amount, you). A deployed Executor can't be a Spoke
+ * position manager, so it goes through Aave's Giver (supply / repay) or Taker (withdraw / borrow):
+ * f(spoke, reserveId, amount, you). `amountAt` is the amount word's byte offset, for patches.
+ */
+function v4Call(x: CompileContext, fn: "supply" | "withdraw" | "borrow" | "repay", r: AaveV4Reserve) {
+  if (is7702(x)) {
+    return {
+      target: AAVE_V4.spoke,
+      amountAt: arg(1),
+      data: (v: bigint) => encodeFunctionData({ abi: aaveV4SpokeAbi, functionName: fn, args: [r.reserveId, v, x.owner] }),
+    };
+  }
+  const viaGiver = fn === "supply" || fn === "repay";
+  const managerFn = `${fn}OnBehalfOf` as const;
+  return {
+    target: viaGiver ? AAVE_V4.giver : AAVE_V4.taker,
+    amountAt: arg(2),
+    data: (v: bigint) =>
+      viaGiver
+        ? encodeFunctionData({ abi: aaveV4GiverAbi, functionName: managerFn as "supplyOnBehalfOf" | "repayOnBehalfOf", args: [AAVE_V4.spoke, r.reserveId, v, x.owner] })
+        : encodeFunctionData({ abi: aaveV4TakerAbi, functionName: managerFn as "withdrawOnBehalfOf" | "borrowOnBehalfOf", args: [AAVE_V4.spoke, r.reserveId, v, x.owner] }),
+  };
 }
 
 /** Compiles a flow into an Executor plan. Throws on validation errors. */
@@ -512,7 +648,8 @@ export async function compileFlow(blocks: Block[], x: CompileContext): Promise<P
   const swaps: Record<string, Swap> = {};
   const used = new Set<string>();
   const aave = new Set<AaveReserve>();
-  for (const b of blocks) await compileBlock(b, x, top, swaps, used, aave);
+  const aaveV4 = new Set<AaveV4Reserve>();
+  for (const b of blocks) await compileBlock(b, x, top, swaps, used, aave, aaveV4);
   top.steps.push({ text: is7702(x) ? "Leftovers stay in your wallet" : "Send every leftover token back to your wallet", depth: 0 });
   // 7702: the delegate tracks these so the plan can't spend more of them than it allots.
   const sweep = is7702(x) ? TRACKED_TOKENS : SWEEP_TOKENS;
@@ -523,6 +660,7 @@ export async function compileFlow(blocks: Block[], x: CompileContext): Promise<P
   for (const m of markets) [m.loanToken, m.series.tokenOut, m.series.pt, m.series.yt].forEach((t) => tokens.add(getAddress(t)));
   const reserves = AAVE_RESERVES.filter((r) => aave.has(r));
   for (const r of reserves) [r.asset, r.aToken.address, r.debtToken.address].forEach((t) => tokens.add(t));
+  for (const r of aaveV4) tokens.add(r.asset); // v4 has no position tokens: supply/debt are reported separately
   for (const b of walk(blocks)) {
     if (b.type === "pull") tokens.add(getAddress(b.token));
     if (b.type === "swap") [b.sell, b.buy].forEach((t) => tokens.add(getAddress(t)));
@@ -538,6 +676,9 @@ export async function compileFlow(blocks: Block[], x: CompileContext): Promise<P
     markets,
     tokens: [...tokens] as Address[],
     aave: reserves.length > 0 || allBlocks(blocks).some((b) => b.type === "guardAaveHealth"),
+    ...((aaveV4.size > 0 || allBlocks(blocks).some((b) => b.type === "guardAaveV4Health")) && {
+      aaveV4: AAVE_V4_RESERVES.filter((r) => aaveV4.has(r)),
+    }),
     owner: x.owner,
     executor: x.executor,
     calls: top.calls,

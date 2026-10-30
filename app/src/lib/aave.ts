@@ -1,6 +1,6 @@
 import type { Address, PublicClient } from "viem";
-import { aavePoolAbi, erc20Abi } from "./abis";
-import { AAVE_POOL, AAVE_RESERVES, type AaveReserve } from "./registry";
+import { aavePoolAbi, aaveV4SpokeAbi, erc20Abi } from "./abis";
+import { AAVE_POOL, AAVE_RESERVES, AAVE_V4, AAVE_V4_RESERVES, type AaveReserve, type AaveV4Reserve } from "./registry";
 
 /** Aave ReserveConfigurationMap bits (aave-v3-origin ReserveConfiguration.sol). */
 const LTV_MASK = 0xffffn;
@@ -46,5 +46,41 @@ export async function readAave(client: PublicClient, owner: Address): Promise<Aa
     health,
     totalCollateralBase,
     totalDebtBase,
+  };
+}
+
+export type AaveV4ReserveView = {
+  reserve: AaveV4Reserve;
+  supplied: bigint;
+  /** Drawn + premium debt, in the asset's units. */
+  debt: bigint;
+  usingAsCollateral: boolean;
+  /** Frozen reserves accept repay and withdraw only; supply and borrow revert. */
+  frozen: boolean;
+};
+
+/** `health` is WAD; maxUint256 without debt. */
+export type AaveV4Account = { reserves: AaveV4ReserveView[]; health: bigint };
+
+/** The owner's Aave v4 Main Spoke position in the supported reserves (one Multicall3 batch). */
+export async function readAaveV4(client: PublicClient, owner: Address): Promise<AaveV4Account> {
+  const spoke = AAVE_V4.spoke;
+  const [account, ...rest] = await Promise.all([
+    client.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "getUserAccountData", args: [owner] }),
+    ...AAVE_V4_RESERVES.map((r) =>
+      Promise.all([
+        client.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "getUserSuppliedAssets", args: [r.reserveId, owner] }),
+        client.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "getUserTotalDebt", args: [r.reserveId, owner] }),
+        client.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "getUserReserveStatus", args: [r.reserveId, owner] }),
+        client.readContract({ address: spoke, abi: aaveV4SpokeAbi, functionName: "getReserveConfig", args: [r.reserveId] }),
+      ]),
+    ),
+  ]);
+  return {
+    health: account[2], // UserAccountData.healthFactor
+    reserves: AAVE_V4_RESERVES.map((reserve, i) => {
+      const [supplied, debt, [usingAsCollateral], config] = rest[i];
+      return { reserve, supplied, debt, usingAsCollateral, frozen: config.frozen };
+    }),
   };
 }

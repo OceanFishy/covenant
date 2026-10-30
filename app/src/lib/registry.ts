@@ -72,6 +72,31 @@ export function reserveOf(asset: Address): AaveReserve {
 
 const AAVE_TOKENS: Token[] = AAVE_RESERVES.flatMap((r) => [r.aToken, r.debtToken]);
 
+/**
+ * Aave v4 Main Spoke. Your positions live on the Spoke; the Executor reaches them only through
+ * Aave's Giver (supply / repay) and Taker (withdraw / borrow) position managers.
+ */
+export const AAVE_V4 = {
+  spoke: getAddress(registry.aaveV4.mainSpoke),
+  giver: getAddress(registry.aaveV4.giver),
+  taker: getAddress(registry.aaveV4.taker),
+};
+
+export type AaveV4Reserve = { symbol: string; asset: Address; reserveId: bigint };
+
+export const AAVE_V4_RESERVES: AaveV4Reserve[] = (["USDC", "USDT"] as const).map((symbol) => ({
+  symbol,
+  asset: TOKENS[symbol].address,
+  reserveId: BigInt(registry.aaveV4.reserves[symbol].reserveId),
+}));
+
+/** The Aave v4 Main Spoke reserve for an underlying asset (USDC / USDT). */
+export function reserveV4Of(asset: Address): AaveV4Reserve {
+  const r = AAVE_V4_RESERVES.find((x) => x.asset.toLowerCase() === asset.toLowerCase());
+  if (!r) throw new Error(`${asset} is not a supported Aave v4 reserve`);
+  return r;
+}
+
 function series(name: keyof typeof registry.pendle, tokenOut: Address): PendleSeries {
   const s = registry.pendle[name];
   return {
@@ -118,6 +143,9 @@ export const MARKETS: Market[] = [
 const LABELS = new Map<string, string>([
   [MORPHO.toLowerCase(), "Morpho Blue"],
   [AAVE_POOL.toLowerCase(), "Aave v3 Pool"],
+  [AAVE_V4.spoke.toLowerCase(), "Aave v4 Main Spoke"],
+  [AAVE_V4.giver.toLowerCase(), "Aave v4 Giver"],
+  [AAVE_V4.taker.toLowerCase(), "Aave v4 Taker"],
   [ZEROX_ALLOWANCE_HOLDER.toLowerCase(), "0x AllowanceHolder"],
   [KYBER_ROUTER.toLowerCase(), "KyberSwap router"],
   ...[...Object.values(TOKENS), ...AAVE_TOKENS].map((tk) => [tk.address.toLowerCase(), tk.symbol] as [string, string]),

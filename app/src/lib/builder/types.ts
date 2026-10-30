@@ -17,19 +17,21 @@ export type Collateral = { kind: "collateral" };
 export type AllShares = { kind: "allShares" };
 /** The owner's live Aave variable debt in `asset` (+bps), at execution time. */
 export type AaveDebt = { kind: "aaveDebt"; asset: Address; bps: number };
-/** Aave repay: exactly the owner's live variable debt in the block's asset. */
+/** The owner's live Aave v4 debt (Main Spoke) in `asset` (+bps), at execution time. */
+export type AaveV4Debt = { kind: "aaveV4Debt"; asset: Address; bps: number };
+/** Aave repay (v3 or v4): exactly the owner's live debt in the block's asset. */
 export type AllDebt = { kind: "allDebt" };
-/** Aave withdraw: all of the owner's supply (aToken balance) of the block's asset. */
+/** Aave withdraw (v3 or v4): all of the owner's supply of the block's asset. */
 export type Supplied = { kind: "supplied" };
 
-export type Amount = Fixed | Balance | Debt | Collateral | AllShares | AaveDebt | AllDebt | Supplied;
+export type Amount = Fixed | Balance | Debt | Collateral | AllShares | AaveDebt | AaveV4Debt | AllDebt | Supplied;
 
 type Base = { id: string };
 
 export type Block =
   | (Base & { type: "accrueInterest"; market: string })
   | (Base & { type: "pull"; token: Address; amount: Fixed })
-  | (Base & { type: "flashLoan"; token: Address; amount: Fixed | Debt | AaveDebt; children: Block[] })
+  | (Base & { type: "flashLoan"; token: Address; amount: Fixed | Debt | AaveDebt | AaveV4Debt; children: Block[] })
   | (Base & { type: "repay"; market: string; amount: AllShares | Fixed | Balance })
   | (Base & { type: "withdrawCollateral"; market: string; amount: Collateral | Fixed })
   | (Base & { type: "supplyCollateral"; market: string; amount: Balance | Fixed })
@@ -43,7 +45,7 @@ export type Block =
       buy: Address;
       /** exactIn: sell `amount`; minOut: buy at least `amount` (fixed, or a Morpho / Aave debt). */
       mode: "exactIn" | "minOut";
-      amount: Fixed | Debt | AaveDebt;
+      amount: Fixed | Debt | AaveDebt | AaveV4Debt;
     })
   | (Base & { type: "guardMinBalance"; token: Address; min: Fixed })
   | (Base & { type: "guardNoDebt"; market: string })
@@ -54,7 +56,14 @@ export type Block =
   | (Base & { type: "aaveBorrow"; asset: Address; amount: Fixed })
   | (Base & { type: "aaveRepay"; asset: Address; amount: AllDebt | Balance | Fixed })
   | (Base & { type: "guardAaveNoDebt"; asset: Address })
-  | (Base & { type: "guardAaveHealth"; min: string });
+  | (Base & { type: "guardAaveHealth"; min: string })
+  // Aave v4 Main Spoke, through Aave's Giver (supply / repay) and Taker (withdraw / borrow).
+  | (Base & { type: "aaveV4Supply"; asset: Address; amount: Balance | Fixed })
+  | (Base & { type: "aaveV4Withdraw"; asset: Address; amount: Supplied | Fixed })
+  | (Base & { type: "aaveV4Borrow"; asset: Address; amount: Fixed })
+  | (Base & { type: "aaveV4Repay"; asset: Address; amount: AllDebt | Balance | Fixed })
+  | (Base & { type: "guardAaveV4NoDebt"; asset: Address })
+  | (Base & { type: "guardAaveV4Health"; min: string });
 
 export type BlockType = Block["type"];
 

@@ -12,7 +12,7 @@ import {IAavePool} from "./interfaces/IAave.sol";
 /// own storage. Re-running `initialize()` after a config bump adds the new rules.
 contract CovenantDelegateMainnet is CovenantDelegate {
     /// Bump with every MainnetConfig change; the app compares it with `configVersion()`.
-    uint256 public constant CONFIG_VERSION = 1;
+    uint256 public constant CONFIG_VERSION = 2;
 
     constructor() CovenantDelegate(IMorpho(MainnetConfig.MORPHO), IAavePool(MainnetConfig.AAVE_POOL)) {}
 
